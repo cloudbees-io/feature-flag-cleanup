@@ -1,0 +1,222 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: AI Feature Flag cleanup.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        type: string
+        required: true
+        description: URL of the code repository from which the feature flag will be removed. For example `https://github.com/my-organisation/my-project`
+      flag_name:
+        type: string
+        required: true
+        description: Feature flag name.
+      replacement_value:
+        type: string
+        required: true
+        description: The value to replace the flag reference with, e.g. true/false (Boolean flags), 'string-value' (String flags), 123.456 (Number flags).
+
+jobs:
+  remove-flag:
+    permissions:
+      scm-token-own: read
+      scm-token-org: read
+      id-token: write
+    outputs:
+      # Link to the Pull Request for the flag cleanup.
+      pr-url: ${{ steps.create-pull-request.outputs.pr-url }}
+      # Outcome from the analyze step — surfaced to the publish-evidence
+      # job so users see e.g. `unsupported-language` when v1 (Go-only)
+      # rejects a non-Go target.
+      analyze-outcome: ${{ steps.analyze.outputs.outcome }}
+
+    steps:
+      - name: Git global credentials
+        uses: cloudbees-io/configure-git-global-credentials@v2
+        with:
+          repositories: https://github.com/
+
+      - id: bedrock-credentials
+        name: Configure AWS credentials via OIDC
+        uses: cloudbees-io/configure-aws-credentials@v1
+        if: ${{ vars.AWS_OIDC_BEDROCK_ROLE_ARN != 'disabled' }}
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_BEDROCK_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+
+      - id: bedrock-creds-export
+        name: Export AWS STS credentials as step outputs
+        uses: docker://alpine:3.22.4
+        if: ${{ vars.AWS_OIDC_BEDROCK_ROLE_ARN != 'disabled' }}
+        shell: sh
+        run: |
+          set -eu
+          CRED="$HOME/.aws/credentials"
+          test -r "$CRED" || { echo "credentials file missing at $CRED"; exit 1; }
+          awk -F' *= *' -v out="$CLOUDBEES_OUTPUTS" '
+            /^\[default\]/ {in_default=1; next}
+            /^\[/         {in_default=0}
+            in_default && $1=="aws_access_key_id"     {printf "%s", $2 > (out "/access-key-id")}
+            in_default && $1=="aws_secret_access_key" {printf "%s", $2 > (out "/secret-access-key")}
+            in_default && $1=="aws_session_token"     {printf "%s", $2 > (out "/session-token")}
+          ' "$CRED"
+
+      - id: checkout-source
+        name: Get source code
+        uses: cloudbees-io/checkout@v2
+        with:
+          repository: '${{ inputs.repo }}'
+
+      - id: branch-name
+        name: Create branch name
+        uses: docker://alpine/git:v2.52.0
+        shell: sh
+        run: |
+          SAFE_FLAG_NAME=$(echo "${{ inputs.flag_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+          echo remove-flag-$SAFE_FLAG_NAME-$(date +"%Y%m%d-%H%M%S") > "$CLOUDBEES_OUTPUTS/name"
+
+      - id: create-branch
+        name: Create branch
+        uses: docker://alpine/git:v2.52.0
+        shell: sh
+        run: |
+          git checkout -b ${{ steps.branch-name.outputs.name }}
+
+      - id: analyze
+        name: Analyze flag removal
+        uses: ./
+        if: ${{ vars.AWS_OIDC_BEDROCK_ROLE_ARN != 'disabled' }}
+        with:
+          mode: analyze
+          flag-key: ${{ inputs.flag_name }}
+          replacement-value: ${{ inputs.replacement_value }}
+          aws-access-key-id: ${{ steps.bedrock-creds-export.outputs.access-key-id }}
+          aws-secret-access-key: ${{ steps.bedrock-creds-export.outputs.secret-access-key }}
+          aws-session-token: ${{ steps.bedrock-creds-export.outputs.session-token }}
+
+      - id: read-analyze-report
+        name: Read analyze report
+        uses: docker://alpine:3.22.4
+        if: ${{ steps.analyze.outputs.outcome == 'success' }}
+        shell: sh
+        env:
+          REPORT_PATH: ${{ steps.analyze.outputs.report-path }}
+        run: |
+          cat "$REPORT_PATH" > "$CLOUDBEES_OUTPUTS/content"
+
+      - id: publish-analyze-report
+        name: Publish analyze report
+        uses: cloudbees-io/publish-evidence-item@v1
+        if: ${{ steps.analyze.outputs.outcome == 'success' }}
+        with:
+          content: ${{ steps.read-analyze-report.outputs.content }}
+
+      - id: apply
+        name: Apply flag removal
+        uses: ./
+        if: ${{ vars.AWS_OIDC_BEDROCK_ROLE_ARN != 'disabled' && steps.analyze.outputs.outcome == 'success' }}
+        with:
+          mode: apply
+          flag-key: ${{ inputs.flag_name }}
+          replacement-value: ${{ inputs.replacement_value }}
+          report-path: ${{ steps.analyze.outputs.report-path }}
+          aws-access-key-id: ${{ steps.bedrock-creds-export.outputs.access-key-id }}
+          aws-secret-access-key: ${{ steps.bedrock-creds-export.outputs.secret-access-key }}
+          aws-session-token: ${{ steps.bedrock-creds-export.outputs.session-token }}
+
+        # Dummy step for testing in environments where Bedrock is not available (e.g. preprod).
+      - id: flag-cleanup-dummy
+        name: Run flag cleanup (dummy)
+        uses: docker://golang:1.26-alpine
+        if: ${{ vars.AWS_OIDC_BEDROCK_ROLE_ARN == 'disabled' }}
+        shell: sh
+        run: |
+          echo "<Insert flag cleanup action here! Replace flag ${{ inputs.flag_name }} with \"${{ inputs.replacement_value }}\">"
+          echo "`date`: ${{ inputs.flag_name }} -> ${{ inputs.replacement_value }}" >> log.txt
+
+      - id: stage-changes
+        name: Stage git changes
+        uses: docker://alpine/git:v2.52.0
+        if: ${{ steps.apply.outputs.outcome == 'success' }}
+        shell: sh
+        run: |
+          git add --all
+
+      - id: gh-access-token
+        name: Get an SCM access token
+        uses: cloudbees-io/get-scm-access-token@v1
+        if: ${{ steps.apply.outputs.outcome == 'success' }}
+        with:
+          repository: ${{ inputs.repo }}
+
+      - id: unify-commit
+        name: Commit changes (using API to get signed commit)
+        uses: ./actions/unify-commit
+        if: ${{ steps.apply.outputs.outcome == 'success' }}
+        with:
+          scm-token: ${{ steps.gh-access-token.outputs.access-token }}
+          commit-message: 'Remove feature flag ${{ inputs.flag_name }}.'
+
+      - id: create-pull-request
+        name: Create pull request
+        uses: docker://serversideup/github-cli:2.92.0
+        if: ${{ steps.apply.outputs.outcome == 'success' }}
+        shell: sh
+        env:
+          GH_TOKEN: ${{ steps.gh-access-token.outputs.access-token }}
+        run: |
+          gh pr create --title "Remove feature flag ${{ inputs.flag_name }}." --body "This change was submitted by the Unify AI assistant. Remove the feature flag '${{ inputs.flag_name }}', replace it with '${{ inputs.replacement_value }}'."
+          gh pr view --json url -q .url > "$CLOUDBEES_OUTPUTS/pr-url"
+
+  publish-evidence:
+    needs: remove-flag
+    if: ${{ needs.remove-flag.outputs.analyze-outcome == 'success' ||
+            needs.remove-flag.outputs.analyze-outcome == 'type-mismatch' ||
+            needs.remove-flag.outputs.analyze-outcome == 'no-matches' ||
+            needs.remove-flag.outputs.analyze-outcome == 'unsupported-language' ||
+            needs.remove-flag.outputs.analyze-outcome == 'report-syntax-invalid' ||
+            needs.remove-flag.outputs.analyze-outcome == 'error' }}
+    steps:
+      - id: prepare-evidence
+        name: Prepare evidence content
+        uses: docker://alpine:3.21
+        shell: sh
+        run: |
+          OUTCOME="${{ needs.remove-flag.outputs.analyze-outcome }}"
+          if [ "$OUTCOME" = "success" ]; then
+            printf -- '- Replaced feature flag `%s` with `%s`\n- Pull request: [PR](%s)\n' \
+              '${{ inputs.flag_name }}' \
+              '${{ inputs.replacement_value }}' \
+              '${{ needs.remove-flag.outputs.pr-url }}' \
+              > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "type-mismatch" ]; then
+            printf -- '- **Error:** replacement value `%s` is not compatible with the declared type of flag `%s`.\n- Correct the value and re-run.\n' \
+              '${{ inputs.replacement_value }}' \
+              '${{ inputs.flag_name }}' \
+              > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "no-matches" ]; then
+            printf -- '- No references to flag `%s` were found — no changes made.\n' \
+              '${{ inputs.flag_name }}' \
+              > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "unsupported-language" ]; then
+            printf -- '- **Error:** the target repository language is not supported. No changes made.\n' \
+              > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "report-syntax-invalid" ]; then
+            printf -- '- **Error:** the agent produced a syntactically invalid edit for flag `%s`. No changes made. Re-run to retry.\n' \
+              '${{ inputs.flag_name }}' \
+              > "$CLOUDBEES_OUTPUTS/content"
+          else
+            printf -- '- **Error:** flag cleanup for `%s` ended with outcome `%s`. Check the step logs for details.\n' \
+              '${{ inputs.flag_name }}' \
+              "$OUTCOME" \
+              > "$CLOUDBEES_OUTPUTS/content"
+          fi
+
+      - id: publish-evidence
+        name: Publish evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: ${{ steps.prepare-evidence.outputs.content }}

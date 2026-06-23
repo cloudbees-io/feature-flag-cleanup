@@ -1,0 +1,158 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: action
+name: unify-commit
+description: "'git commit' staged changes, using the GitHub API. This results in a signed/verified commit (which a plain 'git commit' using the GitHub App token would not produce)"
+inputs:
+  scm-token:
+    description: "The SCM authentication token."
+    required: false
+    default: ${{ cloudbees.scm.token }}
+  commit-message:
+    description: "The commit message."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: gh-api-commit
+      name: Commit staged changes using the GitHub API (verified commit).
+      uses: docker://serversideup/github-cli:2.92.0
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.scm-token }}
+      run: |
+        set -euo pipefail
+
+        # Install jq command used by script.
+        apt -qq update && apt -qq -y install jq
+
+        COMMIT_MESSAGE="${{ inputs.commit-message }}"
+        if [[ -z "$COMMIT_MESSAGE" ]]; then
+            echo "Error: Commit message is required (input: commit-message)"
+            exit 1
+        fi
+
+        # Get repository information from git remote
+        REMOTE_URL=$(git config --get remote.origin.url)
+        if [[ -z "$REMOTE_URL" ]]; then
+            echo "Error: No remote 'origin' configured"
+            exit 1
+        fi
+
+        # Parse owner/repo from URL (handles both HTTPS and SSH formats)
+        if [[ "$REMOTE_URL" =~ github\.com[:/]([^/]+)/([^/]+)(\.git)?$ ]]; then
+            OWNER="${BASH_REMATCH[1]}"
+            REPO_NAME="${BASH_REMATCH[2]}"
+            REPO="$OWNER/$REPO_NAME"
+        else
+            echo "Error: Could not parse GitHub repository from remote URL: $REMOTE_URL"
+            exit 1
+        fi
+
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        BASE_COMMIT=$(git rev-parse HEAD)
+
+        if git diff --cached --quiet; then
+            echo "Error: No changes staged for commit. Use 'git add' first."
+            exit 1
+        fi
+
+        echo "Creating commit via GitHub API..."
+        echo "Repository: $REPO"
+        echo "Branch: $CURRENT_BRANCH"
+        echo "Base commit: ${BASE_COMMIT:0:8}"
+
+        BASE_TREE=$(gh api "/repos/$REPO/git/commits/$BASE_COMMIT" --jq '.tree.sha')
+        TREE_ENTRIES="[]"
+
+        while IFS=$'\t' read -r STATUS OLD_FILE NEW_FILE; do
+            case "$STATUS" in
+                D*)
+                    FILE="$OLD_FILE"
+                    ;;
+                R*|C*)
+                    FILE="$NEW_FILE"
+                    ;;
+                *)
+                    FILE="$OLD_FILE"
+                    ;;
+            esac
+
+            if [[ "$STATUS" == D* ]]; then
+                TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq --arg path "$FILE" \
+                    '. += [{"path": $path, "mode": "100644", "type": "blob", "sha": null}]')
+            else
+                if [[ "$STATUS" == R* ]]; then
+                    TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq --arg path "$OLD_FILE" \
+                        '. += [{"path": $path, "mode": "100644", "type": "blob", "sha": null}]')
+                fi
+
+                STAGED_CONTENT_BASE64=$(git show ":$FILE" | base64 | tr -d '\n')
+                BLOB_REQUEST=$(jq -cn \
+                    --arg content "$STAGED_CONTENT_BASE64" \
+                    '{content: $content, encoding: "base64"}')
+                BLOB_SHA=$(printf '%s' "$BLOB_REQUEST" | gh api "/repos/$REPO/git/blobs" \
+                    --input - \
+                    --jq '.sha')
+
+                MODE=$(git ls-files -s "$FILE" | awk '{print $1}')
+                if [[ -z "$MODE" ]]; then
+                    if [[ -x "$FILE" ]]; then
+                        MODE="100755"
+                    else
+                        MODE="100644"
+                    fi
+                fi
+
+                TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq \
+                    --arg path "$FILE" \
+                    --arg sha "$BLOB_SHA" \
+                    --arg mode "$MODE" \
+                    '. += [{"path": $path, "mode": $mode, "type": "blob", "sha": $sha}]')
+            fi
+        done < <(git diff --cached --name-status)
+
+        TREE_PAYLOAD=$(jq -n \
+            --arg base_tree "$BASE_TREE" \
+            --argjson tree "$TREE_ENTRIES" \
+            '{base_tree: $base_tree, tree: $tree}')
+
+        if ! TREE_RESPONSE=$(gh api "/repos/$REPO/git/trees" --input - <<< "$TREE_PAYLOAD" 2>&1); then
+            echo "Error creating tree via API: $TREE_RESPONSE"
+            exit 1
+        fi
+
+        NEW_TREE=$(echo "$TREE_RESPONSE" | jq -r '.sha')
+
+        COMMIT_PAYLOAD=$(jq -n \
+            --arg message "$COMMIT_MESSAGE" \
+            --arg tree "$NEW_TREE" \
+            --arg parent "$BASE_COMMIT" \
+            '{message: $message, tree: $tree, parents: [$parent]}')
+
+        if ! COMMIT_RESPONSE=$(gh api "/repos/$REPO/git/commits" --input - <<< "$COMMIT_PAYLOAD" 2>&1); then
+            echo "Error creating commit via API: $COMMIT_RESPONSE"
+            exit 1
+        fi
+
+        NEW_COMMIT=$(echo "$COMMIT_RESPONSE" | jq -r '.sha')
+
+        if gh api "repos/$REPO/git/refs/heads/$CURRENT_BRANCH" >/dev/null 2>&1; then
+            gh api "repos/$REPO/git/refs/heads/$CURRENT_BRANCH" \
+                -X PATCH \
+                -f sha="$NEW_COMMIT" \
+                > /dev/null
+        else
+            gh api "repos/$REPO/git/refs" \
+                -f ref="refs/heads/$CURRENT_BRANCH" \
+                -f sha="$NEW_COMMIT" \
+                > /dev/null
+        fi
+
+        git fetch origin "$CURRENT_BRANCH"
+        git update-ref "refs/heads/$CURRENT_BRANCH" "$NEW_COMMIT"
+        git reset --mixed "$NEW_COMMIT"
+
+        echo "✓ Created verified commit: ${NEW_COMMIT:0:8}"
+        echo "  Message: $COMMIT_MESSAGE"
+        echo "✓ Updated remote branch: $CURRENT_BRANCH"

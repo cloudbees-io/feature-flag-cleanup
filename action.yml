@@ -1,0 +1,69 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: action
+name: "Clean up a feature flag with Claude Code"
+
+inputs:
+  mode:
+    description: "Dispatch keyword: analyze | apply"
+    required: true
+  flag-key:
+    description: "Flag key to remove. Single key; one-flag-per-invocation (v0.1)."
+    required: true
+  replacement-value:
+    description: "Literal to substitute at call sites. Must match the flag's declared type — boolean ('true' or 'false'), string, or number (integer or floating-point). The skill validates this against the flag's SDK declaration."
+    required: false
+  language:
+    description: "Source language of the target repo: 'go'|'js'|'ts'|'py'|'java'. When unset, the entrypoint auto-detects by manifest priority (go > ts > js > py > java). Pass explicitly in polyglot repos to override auto-detection."
+    required: false
+  report-path:
+    description: "Absolute path to the analyze-mode report. Required in apply mode; pass through ${{ steps.<analyze>.outputs.report-path }}."
+    required: false
+  base-branch:
+    description: "Upstream branch to use as the analyze base. Defaults to the remote's default branch (origin/HEAD). Pass explicitly when cleaning a flag from a non-default branch."
+    required: false
+  aws-access-key-id:
+    description: "STS access key id. Required for Bedrock-direct mode. Wire from a prior cloudbees-io/configure-aws-credentials@v1 + bedrock-creds-export step."
+    required: false
+  aws-secret-access-key:
+    description: "STS secret access key. Pair with aws-access-key-id."
+    required: false
+  aws-session-token:
+    description: "STS session token. Pair with aws-access-key-id."
+    required: false
+  aws-region:
+    description: "AWS region for Bedrock calls. Defaults to us-east-1."
+    required: false
+    default: us-east-1
+
+outputs:
+  report-path:
+    description: "Absolute path to the analyze-mode report.json (under $WORKSPACE/.flag-cleanup/, excluded from the PR via .git/info/exclude)."
+    value: ${{ steps.run-agent.outputs.report-path }}
+  outcome:
+    description: "Canonical outcome code. See spec.md Outcome Codes table."
+    value: ${{ steps.run-agent.outputs.outcome }}
+  files-modified:
+    description: "Count of files edited (apply modes only)."
+    value: ${{ steps.run-agent.outputs.files-modified }}
+
+runs:
+  using: composite
+  steps:
+    - id: run-agent
+      uses: docker://020229604682.dkr.ecr.us-east-1.amazonaws.com/services/unify-ai-flag-cleanup-agent:0.0.1
+      shell: bash
+      run: /usr/local/bin/entrypoint.sh
+      env:
+        MODE:                             ${{ inputs.mode }}
+        FLAG_KEY:                         ${{ inputs.flag-key }}
+        REPLACEMENT_VALUE:                ${{ inputs.replacement-value }}
+        LANGUAGE_INPUT:                   ${{ inputs.language }}
+        REPORT_PATH:                      ${{ inputs.report-path }}
+        BASE_BRANCH_INPUT:                ${{ inputs.base-branch }}
+        WORKSPACE:                        ${{ cloudbees.workspace }}
+        USE_BEDROCK:                      "true"
+        CLAUDE_CODE_USE_BEDROCK:          "1"
+        AWS_ACCESS_KEY_ID:                ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY:            ${{ inputs.aws-secret-access-key }}
+        AWS_SESSION_TOKEN:                ${{ inputs.aws-session-token }}
+        AWS_REGION:                       ${{ inputs.aws-region }}
