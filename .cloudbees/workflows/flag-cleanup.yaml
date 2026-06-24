@@ -65,8 +65,8 @@ jobs:
           mode: analyze
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
-          bifrost-base-url: ${{ vars.BIFROST_BASE_URL }}
-          bifrost-vk: ${{ secrets.BIFROST_VK }}
+          bifrost-base-url: ${{ inputs.bifrost-base-url }}
+          bifrost-vk: ${{ inputs.bifrost-vk }}
 
       - id: read-analyze-report
         name: Read analyze report
@@ -94,8 +94,8 @@ jobs:
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
           report-path: ${{ steps.analyze.outputs.report-path }}
-          bifrost-base-url: ${{ vars.BIFROST_BASE_URL }}
-          bifrost-vk: ${{ secrets.BIFROST_VK }}
+          bifrost-base-url: ${{ inputs.bifrost-base-url }}
+          bifrost-vk: ${{ inputs.bifrost-vk }}
 
       - id: stage-changes
         name: Stage git changes
