@@ -22,19 +22,16 @@ inputs:
   base-branch:
     description: "Upstream branch to use as the analyze base. Defaults to the remote's default branch (origin/HEAD). Pass explicitly when cleaning a flag from a non-default branch."
     required: false
-  aws-access-key-id:
-    description: "STS access key id. Required for Bedrock-direct mode. Wire from a prior cloudbees-io/configure-aws-credentials@v1 + bedrock-creds-export step."
+  bifrost-base-url:
+    description: "Bifrost gateway base URL"
+    required: true
+  bifrost-vk:
+    description: "Bifrost virtual key. Sourced from a component-level secret in the calling workflow."
+    required: true
+  model:
+    description: "Bifrost model alias to drive Claude Code with."
     required: false
-  aws-secret-access-key:
-    description: "STS secret access key. Pair with aws-access-key-id."
-    required: false
-  aws-session-token:
-    description: "STS session token. Pair with aws-access-key-id."
-    required: false
-  aws-region:
-    description: "AWS region for Bedrock calls. Defaults to us-east-1."
-    required: false
-    default: us-east-1
+    default: claude-4-5-sonnet-global
 
 outputs:
   report-path:
@@ -51,7 +48,7 @@ runs:
   using: composite
   steps:
     - id: run-agent
-      uses: docker://020229604682.dkr.ecr.us-east-1.amazonaws.com/services/unify-ai-flag-cleanup-agent:a7252a4aeb3cd56c010ca24fe9d0507c303ff594
+      uses: docker://020229604682.dkr.ecr.us-east-1.amazonaws.com/services/unify-ai-flag-cleanup-agent:fbd86f1159dad7a82fd839101ac0d6e091e80f04
       shell: bash
       run: /usr/local/bin/entrypoint.sh
       env:
@@ -62,9 +59,6 @@ runs:
         REPORT_PATH:                      ${{ inputs.report-path }}
         BASE_BRANCH_INPUT:                ${{ inputs.base-branch }}
         WORKSPACE:                        ${{ cloudbees.workspace }}
-        USE_BEDROCK:                      "true"
-        CLAUDE_CODE_USE_BEDROCK:          "1"
-        AWS_ACCESS_KEY_ID:                ${{ inputs.aws-access-key-id }}
-        AWS_SECRET_ACCESS_KEY:            ${{ inputs.aws-secret-access-key }}
-        AWS_SESSION_TOKEN:                ${{ inputs.aws-session-token }}
-        AWS_REGION:                       ${{ inputs.aws-region }}
+        BIFROST_BASE_URL:                 ${{ inputs.bifrost-base-url }}
+        BIFROST_VK:                       ${{ inputs.bifrost-vk }}
+        MODEL:                            ${{ inputs.model }}
