@@ -1,6 +1,7 @@
 apiVersion: automation.cloudbees.io/v1alpha1
 kind: action
 name: "Clean up a feature flag with Claude Code"
+description: "AI-driven feature flag cleanup action. Analyzes a repository and removes a specified feature flag, replacing all call sites with the given replacement value, then opens a pull request."
 
 inputs:
   mode:
@@ -50,7 +51,7 @@ runs:
   using: composite
   steps:
     - id: run-agent
-      uses: docker://020229604682.dkr.ecr.us-east-1.amazonaws.com/services/unify-ai-flag-cleanup-agent:0.0.1
+      uses: docker://020229604682.dkr.ecr.us-east-1.amazonaws.com/services/unify-ai-flag-cleanup-agent:a7252a4aeb3cd56c010ca24fe9d0507c303ff594
       shell: bash
       run: /usr/local/bin/entrypoint.sh
       env:
