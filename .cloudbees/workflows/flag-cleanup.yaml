@@ -53,7 +53,7 @@ jobs:
 
       - id: branch-name
         name: Create branch name
-        uses: docker://alpine/git:v2.52.0
+        uses: docker://alpine/git:v2.54.0
         shell: sh
         run: |
           SAFE_FLAG_NAME=$(echo "${{ inputs.flag_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
@@ -61,7 +61,7 @@ jobs:
 
       - id: create-branch
         name: Create branch
-        uses: docker://alpine/git:v2.52.0
+        uses: docker://alpine/git:v2.54.0
         shell: sh
         run: |
           git checkout -b ${{ steps.branch-name.outputs.name }}
@@ -78,7 +78,7 @@ jobs:
 
       - id: read-analyze-report
         name: Read analyze report
-        uses: docker://alpine:3.22.4
+        uses: docker://alpine:3.24
         if: ${{ steps.analyze.outputs.outcome == 'success' }}
         shell: sh
         env:
@@ -107,7 +107,7 @@ jobs:
 
       - id: stage-changes
         name: Stage git changes
-        uses: docker://alpine/git:v2.52.0
+        uses: docker://alpine/git:v2.54.0
         if: ${{ steps.apply.outputs.outcome == 'success' }}
         shell: sh
         run: |
@@ -150,7 +150,7 @@ jobs:
     steps:
       - id: prepare-evidence
         name: Prepare evidence content
-        uses: docker://alpine:3.21
+        uses: docker://alpine:3.24
         shell: sh
         run: |
           OUTCOME="${{ needs.remove-flag.outputs.analyze-outcome }}"
