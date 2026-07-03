@@ -130,7 +130,7 @@ jobs:
 
       - id: create-pull-request
         name: Create pull request
-        uses: docker://serversideup/github-cli:2.92.0
+        uses: docker://ghcr.io/cli/cli:v2.96.0
         if: ${{ steps.apply.outputs.outcome == 'success' }}
         shell: sh
         env:
