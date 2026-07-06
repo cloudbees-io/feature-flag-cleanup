@@ -1,0 +1,39 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: action
+name: get-bifrost-config
+description: >
+  Fetch the Bifrost gateway config (base URL and virtual key) for this run at
+  runtime from run-service, authenticated by the workflow build token. This
+  avoids passing the Bifrost virtual key as a plaintext workflow_dispatch input
+  (which would be visible in the runs UI, event.json, and logs).
+outputs:
+  bifrost-base-url:
+    description: "Bifrost gateway base URL."
+    value: ${{ steps.get-config.outputs.bifrost-base-url }}
+  bifrost-vk:
+    description: "Bifrost virtual key."
+    value: ${{ steps.get-config.outputs.bifrost-vk }}
+
+runs:
+  using: composite
+  steps:
+    - id: get-config
+      name: Get Bifrost config
+      uses: docker://alpine:3.22.4
+      shell: sh
+      run: |
+        set -eu
+        apk add --no-cache -q curl jq
+        RESPONSE=$(curl --fail --silent --show-error \
+          --header "Authorization: Bearer ${{ cloudbees.api.token }}" \
+          --header "Content-Type: application/json" \
+          --data-raw '{}' \
+          "${{ cloudbees.api.url }}/reserved/v1/resources/${{ cloudbees.org.id }}/workflow-secrets")
+        printf '%s' "$RESPONSE" \
+          | jq -r '.secrets["bifrost-base-url"] // error("bifrost-base-url missing in workflow-secrets response")' \
+          | tr -d '\n' \
+          > "$CLOUDBEES_OUTPUTS/bifrost-base-url"
+        printf '%s' "$RESPONSE" \
+          | jq -r '.secrets["bifrost-vk"] // error("bifrost-vk missing in workflow-secrets response")' \
+          | tr -d '\n' \
+          > "$CLOUDBEES_OUTPUTS/bifrost-vk"
