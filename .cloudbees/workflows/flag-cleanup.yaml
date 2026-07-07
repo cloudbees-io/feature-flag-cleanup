@@ -130,12 +130,13 @@ jobs:
 
       - id: create-pull-request
         name: Create pull request
-        uses: docker://ghcr.io/cli/cli:v2.96.0
+        uses: docker://alpine:3.24
         if: ${{ steps.apply.outputs.outcome == 'success' }}
         shell: sh
         env:
           GH_TOKEN: ${{ steps.gh-access-token.outputs.access-token }}
         run: |
+          apk add --no-cache github-cli
           gh pr create --title "Remove feature flag ${{ inputs.flag_name }}." --body "This change was submitted by the Unify AI assistant. Remove the feature flag '${{ inputs.flag_name }}', replace it with '${{ inputs.replacement_value }}'."
           gh pr view --json url -q .url > "$CLOUDBEES_OUTPUTS/pr-url"
 
