@@ -14,6 +14,12 @@ inputs:
 runs:
   using: composite
   steps:
+    - id: install-tools
+      name: Install required tools
+      uses: docker://alpine:3.24
+      shell: sh
+      run: apk add --no-cache bash jq github-cli git
+
     - id: gh-api-commit
       name: Commit staged changes using the GitHub API (verified commit).
       uses: docker://alpine:3.24
@@ -22,7 +28,6 @@ runs:
         GH_TOKEN: ${{ inputs.scm-token }}
       run: |
         set -euo pipefail
-        apk add --no-cache bash jq github-cli git
 
         COMMIT_MESSAGE="${{ inputs.commit-message }}"
         if [[ -z "$COMMIT_MESSAGE" ]]; then
