@@ -14,35 +14,30 @@ inputs:
 runs:
   using: composite
   steps:
-    - id: install-tools
-      name: Install required tools
-      uses: docker://alpine:3.24
-      shell: sh
-      run: apk add --no-cache bash jq github-cli git
-
     - id: gh-api-commit
       name: Commit staged changes using the GitHub API (verified commit).
       uses: docker://alpine:3.24
-      shell: bash
+      shell: sh
       env:
         GH_TOKEN: ${{ inputs.scm-token }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
       run: |
+        apk add --no-cache bash jq github-cli git
+
+        cat > /tmp/commit.sh << 'BASH_EOF'
         set -euo pipefail
 
-        COMMIT_MESSAGE="${{ inputs.commit-message }}"
-        if [[ -z "$COMMIT_MESSAGE" ]]; then
+        if [ -z "$COMMIT_MESSAGE" ]; then
             echo "Error: Commit message is required (input: commit-message)"
             exit 1
         fi
 
-        # Get repository information from git remote
         REMOTE_URL=$(git config --get remote.origin.url)
-        if [[ -z "$REMOTE_URL" ]]; then
+        if [ -z "$REMOTE_URL" ]; then
             echo "Error: No remote 'origin' configured"
             exit 1
         fi
 
-        # Parse owner/repo from URL (handles both HTTPS and SSH formats)
         if [[ "$REMOTE_URL" =~ github\.com[:/]([^/]+)/([^/]+)(\.git)?$ ]]; then
             OWNER="${BASH_REMATCH[1]}"
             REPO_NAME="${BASH_REMATCH[2]%.git}"
@@ -99,8 +94,8 @@ runs:
                     --jq '.sha')
 
                 MODE=$(git ls-files -s "$FILE" | awk '{print $1}')
-                if [[ -z "$MODE" ]]; then
-                    if [[ -x "$FILE" ]]; then
+                if [ -z "$MODE" ]; then
+                    if [ -x "$FILE" ]; then
                         MODE="100755"
                     else
                         MODE="100644"
@@ -156,6 +151,9 @@ runs:
         git update-ref "refs/heads/$CURRENT_BRANCH" "$NEW_COMMIT"
         git reset --mixed "$NEW_COMMIT"
 
-        echo "✓ Created verified commit: ${NEW_COMMIT:0:8}"
-        echo "  Message: $COMMIT_MESSAGE"
-        echo "✓ Updated remote branch: $CURRENT_BRANCH"
+        echo "Created verified commit: ${NEW_COMMIT:0:8}"
+        echo "Message: $COMMIT_MESSAGE"
+        echo "Updated remote branch: $CURRENT_BRANCH"
+        BASH_EOF
+
+        bash /tmp/commit.sh
