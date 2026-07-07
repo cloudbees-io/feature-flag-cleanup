@@ -3,9 +3,7 @@ kind: action
 name: get-bifrost-config
 description: >
   Fetch the Bifrost gateway config (base URL and virtual key) for this run at
-  runtime from run-service, authenticated by the workflow build token. This
-  avoids passing the Bifrost virtual key as a plaintext workflow_dispatch input
-  (which would be visible in the runs UI, event.json, and logs).
+  runtime, authenticated by the workflow build token.
 outputs:
   bifrost-base-url:
     description: "Bifrost gateway base URL."
@@ -33,9 +31,8 @@ runs:
         BIFROST_BASE_URL=$(printf '%s' "$RESPONSE" | jq -r '.secrets["bifrost-base-url"] // error("bifrost-base-url missing in flag-cleanup-secrets response")')
         BIFROST_VK=$(printf '%s' "$RESPONSE" | jq -r '.secrets["bifrost-vk"] // error("bifrost-vk missing in flag-cleanup-secrets response")')
 
-        # Register the virtual key for masking so it is redacted (***) in the
-        # logs of this and subsequent steps that receive it. Step outputs are
-        # not masked automatically; `cloudbees mask` persists across the job.
+        # Mask the virtual key so it is redacted in step logs; masking
+        # persists to subsequent steps that receive it.
         printf '%s' "$BIFROST_VK" | cloudbees mask
 
         printf '%s' "$BIFROST_BASE_URL" | tr -d '\n' > "$CLOUDBEES_OUTPUTS/bifrost-base-url"
