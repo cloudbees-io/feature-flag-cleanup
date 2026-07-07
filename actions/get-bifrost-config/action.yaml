@@ -29,11 +29,14 @@ runs:
           --header "Content-Type: application/json" \
           --data-raw '{}' \
           "${{ cloudbees.api.url }}/reserved/v1/organizations/${{ cloudbees.org.id }}/components/${{ cloudbees.component.id }}/flag-cleanup-secrets")
-        printf '%s' "$RESPONSE" \
-          | jq -r '.secrets["bifrost-base-url"] // error("bifrost-base-url missing in flag-cleanup-secrets response")' \
-          | tr -d '\n' \
-          > "$CLOUDBEES_OUTPUTS/bifrost-base-url"
-        printf '%s' "$RESPONSE" \
-          | jq -r '.secrets["bifrost-vk"] // error("bifrost-vk missing in flag-cleanup-secrets response")' \
-          | tr -d '\n' \
-          > "$CLOUDBEES_OUTPUTS/bifrost-vk"
+
+        BIFROST_BASE_URL=$(printf '%s' "$RESPONSE" | jq -r '.secrets["bifrost-base-url"] // error("bifrost-base-url missing in flag-cleanup-secrets response")')
+        BIFROST_VK=$(printf '%s' "$RESPONSE" | jq -r '.secrets["bifrost-vk"] // error("bifrost-vk missing in flag-cleanup-secrets response")')
+
+        # Register the virtual key for masking so it is redacted (***) in the
+        # logs of this and subsequent steps that receive it. Step outputs are
+        # not masked automatically; `cloudbees mask` persists across the job.
+        printf '%s' "$BIFROST_VK" | cloudbees mask
+
+        printf '%s' "$BIFROST_BASE_URL" | tr -d '\n' > "$CLOUDBEES_OUTPUTS/bifrost-base-url"
+        printf '%s' "$BIFROST_VK" | tr -d '\n' > "$CLOUDBEES_OUTPUTS/bifrost-vk"
