@@ -28,7 +28,7 @@ runs:
           --header "Authorization: Bearer ${{ cloudbees.api.token }}" \
           --header "Content-Type: application/json" \
           --data-raw '{}' \
-          "${{ cloudbees.api.url }}/reserved/v1/resources/${{ cloudbees.org.id }}/flag-cleanup-secrets")
+          "${{ cloudbees.api.url }}/reserved/v1/organizations/${{ cloudbees.org.id }}/components/${{ cloudbees.component.id }}/flag-cleanup-secrets")
         printf '%s' "$RESPONSE" \
           | jq -r '.secrets["bifrost-base-url"] // error("bifrost-base-url missing in flag-cleanup-secrets response")' \
           | tr -d '\n' \
