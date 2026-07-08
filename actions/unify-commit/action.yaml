@@ -16,16 +16,21 @@ runs:
   steps:
     - id: gh-api-commit
       name: Commit staged changes using the GitHub API (verified commit).
-      uses: docker://alpine:3.24
+      uses: docker://alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
       shell: sh
       env:
         GH_TOKEN: ${{ inputs.scm-token }}
         COMMIT_MESSAGE: ${{ inputs.commit-message }}
       run: |
-        apk add --no-cache bash jq github-cli git
+        apk add --no-cache bash jq curl git
 
         cat > /tmp/commit.sh << 'BASH_EOF'
         set -euo pipefail
+
+        # GitHub REST API base + auth headers, reused by every call below.
+        API="https://api.github.com"
+        AUTH="Authorization: Bearer $GH_TOKEN"
+        ACCEPT="Accept: application/vnd.github+json"
 
         if [ -z "$COMMIT_MESSAGE" ]; then
             echo "Error: Commit message is required (input: commit-message)"
@@ -60,7 +65,9 @@ runs:
         echo "Branch: $CURRENT_BRANCH"
         echo "Base commit: ${BASE_COMMIT:0:8}"
 
-        BASE_TREE=$(gh api "/repos/$REPO/git/commits/$BASE_COMMIT" --jq '.tree.sha')
+        BASE_TREE=$(curl --fail-with-body --silent --show-error \
+            --header "$AUTH" --header "$ACCEPT" \
+            "$API/repos/$REPO/git/commits/$BASE_COMMIT" | jq -r '.tree.sha')
         TREE_ENTRIES="[]"
 
         while IFS=$'\t' read -r STATUS OLD_FILE NEW_FILE; do
@@ -89,9 +96,10 @@ runs:
                 BLOB_REQUEST=$(jq -cn \
                     --arg content "$STAGED_CONTENT_BASE64" \
                     '{content: $content, encoding: "base64"}')
-                BLOB_SHA=$(printf '%s' "$BLOB_REQUEST" | gh api "/repos/$REPO/git/blobs" \
-                    --input - \
-                    --jq '.sha')
+                BLOB_SHA=$(printf '%s' "$BLOB_REQUEST" | curl --fail-with-body --silent --show-error \
+                    -X POST --header "$AUTH" --header "$ACCEPT" \
+                    --data @- \
+                    "$API/repos/$REPO/git/blobs" | jq -r '.sha')
 
                 MODE=$(git ls-files -s "$FILE" | awk '{print $1}')
                 if [ -z "$MODE" ]; then
@@ -115,7 +123,10 @@ runs:
             --argjson tree "$TREE_ENTRIES" \
             '{base_tree: $base_tree, tree: $tree}')
 
-        if ! TREE_RESPONSE=$(gh api "/repos/$REPO/git/trees" --input - <<< "$TREE_PAYLOAD" 2>&1); then
+        if ! TREE_RESPONSE=$(curl --fail-with-body --silent --show-error \
+                -X POST --header "$AUTH" --header "$ACCEPT" \
+                --data "$TREE_PAYLOAD" \
+                "$API/repos/$REPO/git/trees" 2>&1); then
             echo "Error creating tree via API: $TREE_RESPONSE"
             exit 1
         fi
@@ -128,23 +139,35 @@ runs:
             --arg parent "$BASE_COMMIT" \
             '{message: $message, tree: $tree, parents: [$parent]}')
 
-        if ! COMMIT_RESPONSE=$(gh api "/repos/$REPO/git/commits" --input - <<< "$COMMIT_PAYLOAD" 2>&1); then
+        if ! COMMIT_RESPONSE=$(curl --fail-with-body --silent --show-error \
+                -X POST --header "$AUTH" --header "$ACCEPT" \
+                --data "$COMMIT_PAYLOAD" \
+                "$API/repos/$REPO/git/commits" 2>&1); then
             echo "Error creating commit via API: $COMMIT_RESPONSE"
             exit 1
         fi
 
         NEW_COMMIT=$(echo "$COMMIT_RESPONSE" | jq -r '.sha')
 
-        if gh api "repos/$REPO/git/refs/heads/$CURRENT_BRANCH" >/dev/null 2>&1; then
-            gh api "repos/$REPO/git/refs/heads/$CURRENT_BRANCH" \
-                -X PATCH \
-                -f sha="$NEW_COMMIT" \
-                > /dev/null
+        REF_STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "$AUTH" --header "$ACCEPT" \
+            "$API/repos/$REPO/git/refs/heads/$CURRENT_BRANCH")
+
+        if [ "$REF_STATUS" = "200" ]; then
+            PATCH_PAYLOAD=$(jq -n --arg sha "$NEW_COMMIT" '{sha: $sha}')
+            curl --fail-with-body --silent --show-error \
+                -X PATCH --header "$AUTH" --header "$ACCEPT" \
+                --data "$PATCH_PAYLOAD" \
+                "$API/repos/$REPO/git/refs/heads/$CURRENT_BRANCH" > /dev/null
         else
-            gh api "repos/$REPO/git/refs" \
-                -f ref="refs/heads/$CURRENT_BRANCH" \
-                -f sha="$NEW_COMMIT" \
-                > /dev/null
+            CREATE_PAYLOAD=$(jq -n \
+                --arg ref "refs/heads/$CURRENT_BRANCH" \
+                --arg sha "$NEW_COMMIT" \
+                '{ref: $ref, sha: $sha}')
+            curl --fail-with-body --silent --show-error \
+                -X POST --header "$AUTH" --header "$ACCEPT" \
+                --data "$CREATE_PAYLOAD" \
+                "$API/repos/$REPO/git/refs" > /dev/null
         fi
 
         git fetch origin "$CURRENT_BRANCH"
