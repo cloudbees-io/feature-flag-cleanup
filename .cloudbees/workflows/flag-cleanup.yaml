@@ -126,15 +126,44 @@ jobs:
 
       - id: create-pull-request
         name: Create pull request
-        uses: docker://alpine:3.24
+        uses: docker://alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
         if: ${{ steps.apply.outputs.outcome == 'success' }}
         shell: sh
         env:
           GH_TOKEN: ${{ steps.gh-access-token.outputs.access-token }}
+          REPO_URL: ${{ inputs.repo }}
+          HEAD_BRANCH: ${{ steps.branch-name.outputs.name }}
+          FLAG_NAME: ${{ inputs.flag_name }}
+          REPLACEMENT_VALUE: ${{ inputs.replacement_value }}
         run: |
-          apk add --no-cache github-cli
-          gh pr create --title "Remove feature flag ${{ inputs.flag_name }}." --body "This change was submitted by the Unify AI assistant. Remove the feature flag '${{ inputs.flag_name }}', replace it with '${{ inputs.replacement_value }}'."
-          gh pr view --json url -q .url > "$CLOUDBEES_OUTPUTS/pr-url"
+          set -eu
+          apk add --no-cache curl jq
+
+          # owner/repo from the repo URL (strip scheme+host, .git, trailing slash)
+          REPO_PATH=$(printf '%s' "$REPO_URL" | sed -E 's#^https?://[^/]+/##; s#\.git$##; s#/$##')
+
+          # Base = the repo's default branch (same target gh pr create picks by default).
+          BASE_BRANCH=$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO_PATH" | jq -r '.default_branch')
+
+          # User inputs are passed via jq --arg (never interpolated into the shell).
+          REQUEST=$(jq -n \
+            --arg title "Remove feature flag $FLAG_NAME." \
+            --arg body "This change was submitted by the Unify AI assistant. Remove the feature flag '$FLAG_NAME', replace it with '$REPLACEMENT_VALUE'." \
+            --arg head "$HEAD_BRANCH" \
+            --arg base "$BASE_BRANCH" \
+            '{title: $title, body: $body, head: $head, base: $base}')
+
+          PR_URL=$(printf '%s' "$REQUEST" | curl --fail --silent --show-error \
+            -X POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --data @- \
+            "https://api.github.com/repos/$REPO_PATH/pulls" | jq -r '.html_url')
+
+          printf '%s' "$PR_URL" > "$CLOUDBEES_OUTPUTS/pr-url"
 
   publish-evidence:
     needs: remove-flag
