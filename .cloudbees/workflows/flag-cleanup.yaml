@@ -17,14 +17,6 @@ on:
         type: string
         required: true
         description: The value to replace the flag reference with, e.g. true/false (Boolean flags), 'string-value' (String flags), 123.456 (Number flags).
-      bifrost-base-url:
-        type: string
-        required: false
-        description: Bifrost gateway base URL. Injected automatically by run-service — customers do not need to set this.
-      bifrost-vk:
-        type: string
-        required: false
-        description: Bifrost virtual key. Injected automatically by run-service — customers do not need to set this.
 
 jobs:
   remove-flag:
@@ -66,6 +58,10 @@ jobs:
         run: |
           git checkout -b ${{ steps.branch-name.outputs.name }}
 
+      - id: bifrost-config
+        name: Get Bifrost config
+        uses: ./actions/get-bifrost-config
+
       - id: analyze
         name: Analyze flag removal
         uses: ./
@@ -73,8 +69,8 @@ jobs:
           mode: analyze
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
-          bifrost-base-url: ${{ inputs.bifrost-base-url }}
-          bifrost-vk: ${{ inputs.bifrost-vk }}
+          bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
+          bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
 
       - id: read-analyze-report
         name: Read analyze report
@@ -102,8 +98,8 @@ jobs:
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
           report-path: ${{ steps.analyze.outputs.report-path }}
-          bifrost-base-url: ${{ inputs.bifrost-base-url }}
-          bifrost-vk: ${{ inputs.bifrost-vk }}
+          bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
+          bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
 
       - id: stage-changes
         name: Stage git changes
