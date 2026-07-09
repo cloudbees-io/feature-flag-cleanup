@@ -1,0 +1,79 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: action
+name: create-pull-request
+description: "Open a pull request for the flag-cleanup branch using the GitHub REST API."
+inputs:
+  repo:
+    description: "URL of the target repository, e.g. https://github.com/my-org/my-repo."
+    required: true
+  head-branch:
+    description: "The branch containing the flag-cleanup commit to open the PR from."
+    required: true
+  flag-name:
+    description: "The feature flag being removed (used in the PR title/body)."
+    required: true
+  replacement-value:
+    description: "The value the flag was replaced with (used in the PR body)."
+    required: true
+  scm-token:
+    description: "The SCM authentication token."
+    required: false
+    default: ${{ cloudbees.scm.token }}
+outputs:
+  pr-url:
+    description: "URL of the created pull request."
+    value: ${{ steps.create-pr.outputs.pr-url }}
+
+runs:
+  using: composite
+  steps:
+    - id: create-pr
+      name: Create pull request via the GitHub API.
+      uses: docker://alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+      shell: sh
+      env:
+        GH_TOKEN: ${{ inputs.scm-token }}
+        REPO_URL: ${{ inputs.repo }}
+        HEAD_BRANCH: ${{ inputs.head-branch }}
+        FLAG_NAME: ${{ inputs.flag-name }}
+        REPLACEMENT_VALUE: ${{ inputs.replacement-value }}
+      run: |
+        set -eu
+        apk add --no-cache curl jq
+
+        # owner/repo from the repo URL (strip scheme+host, .git, trailing slash).
+        REPO_PATH=$(printf '%s' "$REPO_URL" | sed -E 's#^https?://[^/]+/##; s#\.git$##; s#/$##')
+
+        # Trim any surrounding whitespace so the ref is exactly the branch name.
+        HEAD_BRANCH=$(printf '%s' "$HEAD_BRANCH" | tr -d '[:space:]')
+        if [ -z "$HEAD_BRANCH" ]; then
+          echo "create-pull-request: head branch is empty" >&2
+          exit 1
+        fi
+
+        # Base = the repository's default branch.
+        BASE_BRANCH=$(curl --fail-with-body --silent --show-error \
+          --header "Authorization: Bearer $GH_TOKEN" \
+          --header "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/$REPO_PATH" | jq -r '.default_branch // empty')
+        if [ -z "$BASE_BRANCH" ]; then
+          echo "create-pull-request: could not resolve default branch for $REPO_PATH" >&2
+          exit 1
+        fi
+
+        # User inputs are passed via jq --arg (never interpolated into the shell).
+        REQUEST=$(jq -n \
+          --arg title "Remove feature flag $FLAG_NAME." \
+          --arg body "This change was submitted by the Unify AI assistant. Remove the feature flag '$FLAG_NAME', replace it with '$REPLACEMENT_VALUE'." \
+          --arg head "$HEAD_BRANCH" \
+          --arg base "$BASE_BRANCH" \
+          '{title: $title, body: $body, head: $head, base: $base}')
+
+        PR_URL=$(printf '%s' "$REQUEST" | curl --fail-with-body --silent --show-error \
+          -X POST \
+          --header "Authorization: Bearer $GH_TOKEN" \
+          --header "Accept: application/vnd.github+json" \
+          --data @- \
+          "https://api.github.com/repos/$REPO_PATH/pulls" | jq -r '.html_url')
+
+        printf '%s' "$PR_URL" > "$CLOUDBEES_OUTPUTS/pr-url"
