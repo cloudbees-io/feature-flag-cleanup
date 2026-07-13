@@ -47,16 +47,20 @@ jobs:
         name: Create branch name
         uses: docker://alpine/git:v2.54.0
         shell: sh
+        env:
+          FLAG_NAME: ${{ inputs.flag_name }}
         run: |
-          SAFE_FLAG_NAME=$(echo "${{ inputs.flag_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+          SAFE_FLAG_NAME=$(printf '%s' "$FLAG_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
           printf '%s' "remove-flag-$SAFE_FLAG_NAME-$(date +"%Y%m%d-%H%M%S")" > "$CLOUDBEES_OUTPUTS/name"
 
       - id: create-branch
         name: Create branch
         uses: docker://alpine/git:v2.54.0
         shell: sh
+        env:
+          BRANCH_NAME: ${{ steps.branch-name.outputs.name }}
         run: |
-          git checkout -b ${{ steps.branch-name.outputs.name }}
+          git checkout -b "$BRANCH_NAME"
 
       - id: bifrost-config
         name: Get Bifrost config
@@ -148,34 +152,34 @@ jobs:
         name: Prepare evidence content
         uses: docker://alpine:3.24
         shell: sh
+        env:
+          OUTCOME: ${{ needs.remove-flag.outputs.analyze-outcome }}
+          FLAG_NAME: ${{ inputs.flag_name }}
+          REPLACEMENT_VALUE: ${{ inputs.replacement_value }}
+          PR_URL: ${{ needs.remove-flag.outputs.pr-url }}
         run: |
-          OUTCOME="${{ needs.remove-flag.outputs.analyze-outcome }}"
           if [ "$OUTCOME" = "success" ]; then
             printf -- '- Replaced feature flag `%s` with `%s`\n- Pull request: [PR](%s)\n' \
-              '${{ inputs.flag_name }}' \
-              '${{ inputs.replacement_value }}' \
-              '${{ needs.remove-flag.outputs.pr-url }}' \
+              "$FLAG_NAME" "$REPLACEMENT_VALUE" "$PR_URL" \
               > "$CLOUDBEES_OUTPUTS/content"
           elif [ "$OUTCOME" = "type-mismatch" ]; then
             printf -- '- **Error:** replacement value `%s` is not compatible with the declared type of flag `%s`.\n- Correct the value and re-run.\n' \
-              '${{ inputs.replacement_value }}' \
-              '${{ inputs.flag_name }}' \
+              "$REPLACEMENT_VALUE" "$FLAG_NAME" \
               > "$CLOUDBEES_OUTPUTS/content"
           elif [ "$OUTCOME" = "no-matches" ]; then
             printf -- '- No references to flag `%s` were found — no changes made.\n' \
-              '${{ inputs.flag_name }}' \
+              "$FLAG_NAME" \
               > "$CLOUDBEES_OUTPUTS/content"
           elif [ "$OUTCOME" = "unsupported-language" ]; then
             printf -- '- **Error:** the target repository language is not supported. No changes made.\n' \
               > "$CLOUDBEES_OUTPUTS/content"
           elif [ "$OUTCOME" = "report-syntax-invalid" ]; then
             printf -- '- **Error:** the agent produced a syntactically invalid edit for flag `%s`. No changes made. Re-run to retry.\n' \
-              '${{ inputs.flag_name }}' \
+              "$FLAG_NAME" \
               > "$CLOUDBEES_OUTPUTS/content"
           else
             printf -- '- **Error:** flag cleanup for `%s` ended with outcome `%s`. Check the step logs for details.\n' \
-              '${{ inputs.flag_name }}' \
-              "$OUTCOME" \
+              "$FLAG_NAME" "$OUTCOME" \
               > "$CLOUDBEES_OUTPUTS/content"
           fi
 
