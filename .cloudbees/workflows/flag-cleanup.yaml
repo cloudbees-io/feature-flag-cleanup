@@ -43,6 +43,43 @@ jobs:
         with:
           repository: '${{ inputs.repo }}'
 
+      - id: validate-inputs
+        name: Validate workflow inputs
+        uses: docker://alpine:3.24
+        shell: sh
+        env:
+          FLAG_NAME: ${{ inputs.flag_name }}
+          REPLACEMENT_VALUE: ${{ inputs.replacement_value }}
+        run: |
+          # FLAG_NAME: allowlist [A-Za-z0-9._-], length 1..128. A line-anchored
+          # grep would accept "Good\n$(evil)" because the first line matches, so
+          # instead strip every allowed byte and require nothing to remain. The
+          # byte count flows through a pipe (not $()) so a trailing newline is
+          # counted too. Same allowlist as entrypoint.sh validate_inputs().
+          len=$(printf '%s' "$FLAG_NAME" | wc -c)
+          bad=$(printf '%s' "$FLAG_NAME" | tr -d 'A-Za-z0-9._-' | wc -c)
+          if [ "$len" -lt 1 ] || [ "$len" -gt 128 ] || [ "$bad" -ne 0 ]; then
+            printf 'ERROR: flag_name must match ^[A-Za-z0-9._-]{1,128}$\n' >&2
+            exit 1
+          fi
+          # REPLACEMENT_VALUE: any printable value is allowed (true/false,
+          # strings, numbers), but control chars and shell metacharacters are
+          # rejected. Reject control chars first: keep printable 0x20-0x7E and
+          # require nothing to remain, so an embedded newline can't smuggle a
+          # second line past the metacharacter case below (case is not
+          # line-aware). The entrypoint re-validates before use.
+          ctrl=$(printf '%s' "$REPLACEMENT_VALUE" | tr -d '\040-\176' | wc -c)
+          if [ "$ctrl" -ne 0 ]; then
+            printf 'ERROR: replacement_value contains control characters\n' >&2
+            exit 1
+          fi
+          case "$REPLACEMENT_VALUE" in
+            *'$('*|*'`'*|*';'*|*'&'*|*'|'*|*'>'*|*'<'*|*'('*|*')'*|*'$'*)
+              printf 'ERROR: replacement_value contains disallowed characters\n' >&2
+              exit 1
+              ;;
+          esac
+
       - id: branch-name
         name: Create branch name
         uses: docker://alpine/git:v2.54.0
