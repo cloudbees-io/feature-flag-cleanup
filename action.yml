@@ -32,6 +32,10 @@ inputs:
     description: "Bifrost model alias to drive Claude Code with."
     required: false
     default: claude-4-5-sonnet-global
+  debug-claude:
+    description: "Set to '1' to enable HTTP-level debug logging from the Claude CLI. Debug output is printed to stderr on failure. Do not use in production — logs may contain request details."
+    required: false
+    default: "0"
 
 outputs:
   report-path:
@@ -62,3 +66,4 @@ runs:
         BIFROST_BASE_URL:                 ${{ inputs.bifrost-base-url }}
         BIFROST_VK:                       ${{ inputs.bifrost-vk }}
         MODEL:                            ${{ inputs.model }}
+        DEBUG_CLAUDE:                     ${{ inputs.debug-claude }}
