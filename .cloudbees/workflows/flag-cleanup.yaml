@@ -75,6 +75,7 @@ jobs:
           replacement-value: ${{ inputs.replacement_value }}
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
+          debug-claude: '1'
 
       - id: read-analyze-report
         name: Read analyze report
