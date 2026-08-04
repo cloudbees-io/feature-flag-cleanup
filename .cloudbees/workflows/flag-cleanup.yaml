@@ -43,6 +43,14 @@ jobs:
         with:
           repository: '${{ inputs.repo }}'
 
+      - id: checkout-skill
+        name: Get latest cleanup skill
+        uses: cloudbees-io/checkout@v2
+        with:
+          repository: https://github.com/cloudbees/feature-flag-cleanup-skill
+          ref: main
+          path: .flag-cleanup-skill
+
       - id: branch-name
         name: Create branch name
         uses: docker://alpine/git:v2.54.0
@@ -73,6 +81,7 @@ jobs:
           mode: analyze
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
+          skill-src: ${{ cloudbees.workspace }}/.flag-cleanup-skill/skills/feature-flag-cleanup
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
 
@@ -102,6 +111,7 @@ jobs:
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
           report-path: ${{ steps.analyze.outputs.report-path }}
+          skill-src: ${{ cloudbees.workspace }}/.flag-cleanup-skill/skills/feature-flag-cleanup
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
 
