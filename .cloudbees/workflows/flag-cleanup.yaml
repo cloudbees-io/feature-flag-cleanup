@@ -44,11 +44,14 @@ jobs:
           repository: '${{ inputs.repo }}'
 
       - id: checkout-skill
-        name: Get latest cleanup skill
+        name: Get cleanup skill
         uses: cloudbees-io/checkout@v2
         with:
           repository: https://github.com/cloudbees/feature-flag-cleanup-skill
-          ref: main
+          # Floating major tag: picks up patches and backward-compatible skill
+          # changes without a workflow edit. Bump to v2 only for a breaking
+          # skill change (see the skill repo's Versioning section).
+          ref: v1
           path: .flag-cleanup-skill
 
       - id: branch-name
