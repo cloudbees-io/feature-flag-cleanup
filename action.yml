@@ -32,9 +32,6 @@ inputs:
     description: "Bifrost model alias to drive Claude Code with."
     required: false
     default: claude-4-5-sonnet-global
-  skill-src:
-    description: "Path to a skill checkout to use instead of the copy baked into the agent image. When set and it contains a SKILL.md, the run uses this skill; otherwise it falls back to the baked copy. Lets a run pick up the latest skill from its main branch without an image rebuild."
-    required: false
 
 outputs:
   report-path:
@@ -65,4 +62,3 @@ runs:
         BIFROST_BASE_URL:                 ${{ inputs.bifrost-base-url }}
         BIFROST_VK:                       ${{ inputs.bifrost-vk }}
         MODEL:                            ${{ inputs.model }}
-        SKILL_SRC_OVERRIDE:               ${{ inputs.skill-src }}
