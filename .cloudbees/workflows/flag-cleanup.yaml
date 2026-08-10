@@ -146,6 +146,7 @@ jobs:
             needs.remove-flag.outputs.analyze-outcome == 'no-matches' ||
             needs.remove-flag.outputs.analyze-outcome == 'unsupported-language' ||
             needs.remove-flag.outputs.analyze-outcome == 'report-syntax-invalid' ||
+            needs.remove-flag.outputs.analyze-outcome == 'orphaned-references' ||
             needs.remove-flag.outputs.analyze-outcome == 'error' }}
     steps:
       - id: prepare-evidence
@@ -175,6 +176,10 @@ jobs:
               > "$CLOUDBEES_OUTPUTS/content"
           elif [ "$OUTCOME" = "report-syntax-invalid" ]; then
             printf -- '- **Error:** the agent produced a syntactically invalid edit for flag `%s`. No changes made. Re-run to retry.\n' \
+              "$FLAG_NAME" \
+              > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "orphaned-references" ]; then
+            printf -- '- **Error:** removing flag `%s` would leave references behind that were not updated, which would break the build. No changes made. Re-run to retry.\n' \
               "$FLAG_NAME" \
               > "$CLOUDBEES_OUTPUTS/content"
           else
