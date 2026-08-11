@@ -51,7 +51,7 @@ runs:
   using: composite
   steps:
     - id: run-agent
-      uses: docker://public.ecr.aws/l7o7z1g8/actions/unify-ai-flag-cleanup-agent:main-81c8e298c21aa669e53e8c90abc1844dee31f823
+      uses: docker://public.ecr.aws/l7o7z1g8/actions/unify-ai-flag-cleanup-agent:main-cee9cfff3f21a0c42429bd840a6f3334dd8e935a
       shell: bash
       run: /usr/local/bin/entrypoint.sh
       env:
