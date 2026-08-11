@@ -43,6 +43,9 @@ outputs:
   files-modified:
     description: "Count of files edited (apply modes only)."
     value: ${{ steps.run-agent.outputs.files-modified }}
+  orphaned-files:
+    description: "Comma-separated files that still reference the flag but were not covered by the plan. Set only when outcome is orphaned-references; surfaced in evidence to guide the manual fix."
+    value: ${{ steps.run-agent.outputs.orphaned-files }}
 
 runs:
   using: composite

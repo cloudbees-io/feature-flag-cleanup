@@ -30,6 +30,9 @@ jobs:
       # job so users see e.g. `unsupported-language` when v1 (Go-only)
       # rejects a non-Go target.
       analyze-outcome: ${{ steps.analyze.outputs.outcome }}
+      # Files that still reference the flag but the agent could not safely
+      # edit — surfaced in evidence so the user knows what to fix by hand.
+      analyze-orphaned-files: ${{ steps.analyze.outputs.orphaned-files }}
 
     steps:
       - name: Git global credentials
@@ -143,10 +146,10 @@ jobs:
     needs: remove-flag
     if: ${{ needs.remove-flag.outputs.analyze-outcome == 'success' ||
             needs.remove-flag.outputs.analyze-outcome == 'type-mismatch' ||
+            needs.remove-flag.outputs.analyze-outcome == 'orphaned-references' ||
             needs.remove-flag.outputs.analyze-outcome == 'no-matches' ||
             needs.remove-flag.outputs.analyze-outcome == 'unsupported-language' ||
             needs.remove-flag.outputs.analyze-outcome == 'report-syntax-invalid' ||
-            needs.remove-flag.outputs.analyze-outcome == 'orphaned-references' ||
             needs.remove-flag.outputs.analyze-outcome == 'error' }}
     steps:
       - id: prepare-evidence
@@ -158,6 +161,7 @@ jobs:
           FLAG_NAME: ${{ inputs.flag_name }}
           REPLACEMENT_VALUE: ${{ inputs.replacement_value }}
           PR_URL: ${{ needs.remove-flag.outputs.pr-url }}
+          ORPHANED_FILES: ${{ needs.remove-flag.outputs.analyze-orphaned-files }}
         run: |
           if [ "$OUTCOME" = "success" ]; then
             printf -- '- Replaced feature flag `%s` with `%s`\n- Pull request: [PR](%s)\n' \
@@ -167,6 +171,19 @@ jobs:
             printf -- '- **Error:** replacement value `%s` is not compatible with the declared type of flag `%s`.\n- Correct the value and re-run.\n' \
               "$REPLACEMENT_VALUE" "$FLAG_NAME" \
               > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "orphaned-references" ]; then
+            {
+              printf -- '- Flag `%s` was **not** removed — no pull request was created.\n' "$FLAG_NAME"
+              printf -- '- These files still reference the flag and could not be edited automatically (usually tests that mock the flag or assert its value):\n'
+              if [ -n "$ORPHANED_FILES" ]; then
+                echo "$ORPHANED_FILES" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | while IFS= read -r f; do
+                  [ -n "$f" ] && printf -- '    - `%s`\n' "$f"
+                done
+              else
+                printf -- '    - See the Analyze flag removal step logs.\n'
+              fi
+              printf -- '- **To finish the cleanup:** update these files so the flag reference resolves to `%s` (delete a test that only checks the flag; otherwise adjust it to the replacement value), then re-run this workflow or open the pull request manually.\n' "$REPLACEMENT_VALUE"
+            } > "$CLOUDBEES_OUTPUTS/content"
           elif [ "$OUTCOME" = "no-matches" ]; then
             printf -- '- No references to flag `%s` were found — no changes made.\n' \
               "$FLAG_NAME" \
