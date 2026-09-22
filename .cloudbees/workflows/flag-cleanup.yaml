@@ -33,6 +33,10 @@ jobs:
       # Files that still reference the flag but the agent could not safely
       # edit — surfaced in evidence so the user knows what to fix by hand.
       analyze-orphaned-files: ${{ steps.analyze.outputs.orphaned-files }}
+      # Reasons the agent deferred to needs_manual_review[] when there was
+      # zero mechanical work to apply (outcome == manual-review-only) —
+      # surfaced in evidence so the user knows why no PR was opened.
+      analyze-manual-review-reasons: ${{ steps.analyze.outputs.manual-review-reasons }}
 
     steps:
       - name: Git global credentials
@@ -147,6 +151,7 @@ jobs:
     if: ${{ needs.remove-flag.outputs.analyze-outcome == 'success' ||
             needs.remove-flag.outputs.analyze-outcome == 'type-mismatch' ||
             needs.remove-flag.outputs.analyze-outcome == 'orphaned-references' ||
+            needs.remove-flag.outputs.analyze-outcome == 'manual-review-only' ||
             needs.remove-flag.outputs.analyze-outcome == 'no-matches' ||
             needs.remove-flag.outputs.analyze-outcome == 'unsupported-language' ||
             needs.remove-flag.outputs.analyze-outcome == 'report-syntax-invalid' ||
@@ -162,6 +167,7 @@ jobs:
           REPLACEMENT_VALUE: ${{ inputs.replacement_value }}
           PR_URL: ${{ needs.remove-flag.outputs.pr-url }}
           ORPHANED_FILES: ${{ needs.remove-flag.outputs.analyze-orphaned-files }}
+          MANUAL_REVIEW_REASONS: ${{ needs.remove-flag.outputs.analyze-manual-review-reasons }}
         run: |
           if [ "$OUTCOME" = "success" ]; then
             printf -- '- Replaced feature flag `%s` with `%s`\n- Pull request: [PR](%s)\n' \
@@ -183,6 +189,19 @@ jobs:
                 printf -- '    - See the Analyze flag removal step logs.\n'
               fi
               printf -- '- **To finish the cleanup:** update these files so the flag reference resolves to `%s` (delete a test that only checks the flag; otherwise adjust it to the replacement value), then re-run this workflow or open the pull request manually.\n' "$REPLACEMENT_VALUE"
+            } > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "manual-review-only" ]; then
+            {
+              printf -- '- Flag `%s` was **not** removed — no pull request was created.\n' "$FLAG_NAME"
+              printf -- '- The cleanup agent found no reference it could safely rewrite mechanically:\n'
+              if [ -n "$MANUAL_REVIEW_REASONS" ]; then
+                echo "$MANUAL_REVIEW_REASONS" | tr ';' '\n' | sed 's/^ *//; s/ *$//' | while IFS= read -r r; do
+                  [ -n "$r" ] && printf -- '    - %s\n' "$r"
+                done
+              else
+                printf -- '    - See the Analyze flag removal step logs.\n'
+              fi
+              printf -- '- **To finish the cleanup:** update the code by hand so it behaves as if `%s` returned `%s`, then remove the flag from CloudBees Platform.\n' "$FLAG_NAME" "$REPLACEMENT_VALUE"
             } > "$CLOUDBEES_OUTPUTS/content"
           elif [ "$OUTCOME" = "no-matches" ]; then
             printf -- '- No references to flag `%s` were found — no changes made.\n' \

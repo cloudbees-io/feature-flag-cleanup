@@ -46,6 +46,9 @@ outputs:
   orphaned-files:
     description: "Comma-separated files that still reference the flag but were not covered by the plan. Set only when outcome is orphaned-references; surfaced in evidence to guide the manual fix."
     value: ${{ steps.run-agent.outputs.orphaned-files }}
+  manual-review-reasons:
+    description: "Semicolon-separated needs_manual_review[] reasons. Set only when outcome is manual-review-only (zero mechanical edits possible — e.g. dynamic flag-key construction); surfaced in evidence to explain why no PR was opened."
+    value: ${{ steps.run-agent.outputs.manual-review-reasons }}
 
 runs:
   using: composite
