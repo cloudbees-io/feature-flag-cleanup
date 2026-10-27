@@ -82,11 +82,6 @@ jobs:
           replacement-value: ${{ inputs.replacement_value }}
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
-          # Sub-org-level override so switching models is a var change, not a
-          # redeploy. Unset -> empty string -> entrypoint.sh's own
-          # ${MODEL:-$DEFAULT_MODEL} falls back to claude-4-5-sonnet-global.
-          # For Opus 5.5, once Bifrost/Bedrock are ready: claude-5-5-opus-global.
-          model: ${{ vars.FLAG_CLEANUP_MODEL }}
 
       - id: read-analyze-report
         name: Read analyze report
