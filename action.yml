@@ -31,7 +31,7 @@ inputs:
   model:
     description: "Bifrost model alias to drive Claude Code with."
     required: false
-    default: claude-4-5-sonnet-global
+    default: claude-5-5-opus-global
 
 outputs:
   report-path:
