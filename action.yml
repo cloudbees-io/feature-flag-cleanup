@@ -49,6 +49,9 @@ outputs:
   manual-review-reasons:
     description: "Semicolon-separated needs_manual_review[] reasons. Set only when outcome is manual-review-only (zero mechanical edits possible — e.g. dynamic flag-key construction); surfaced in evidence to explain why no PR was opened."
     value: ${{ steps.run-agent.outputs.manual-review-reasons }}
+  conflict-detail:
+    description: "JSON object for the apply_conflict that caused outcome=error during apply mode: {file, reason, attempted, applied_files, pending_edit_files, pending_deletion_files}. attempted is the full planned_edits[]/planned_deletions[] entry that failed (the exact edit the agent tried); applied_files/pending_*_files split the rest of the plan by whether apply reached them before the conflict. Not every field is always present (the report-parse failure sites only set file/reason). Empty on every other outcome; surfaced in evidence so the user sees the failure, the exact attempted edit, and the full planned scope — not just that it failed."
+    value: ${{ steps.run-agent.outputs.conflict-detail }}
 
 runs:
   using: composite
