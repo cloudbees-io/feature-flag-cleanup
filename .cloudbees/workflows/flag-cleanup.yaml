@@ -28,18 +28,18 @@ jobs:
       pr-url: ${{ steps.create-pull-request.outputs.pr-url }}
       # Outcome from the analyze step — surfaced to the publish-evidence
       # job so users see e.g. `unsupported-language` or `timeout`.
-      analyze-outcome: ${{ steps.analyze.outputs.outcome }}
+      analyze-outcome: ${{ steps.restore-analyze.outputs.outcome }}
       # Files that still reference the flag but the agent could not safely
       # edit — surfaced in evidence so the user knows what to fix by hand.
-      analyze-orphaned-files: ${{ steps.analyze.outputs.orphaned-files }}
+      analyze-orphaned-files: ${{ steps.restore-analyze.outputs.orphaned-files }}
       # Reasons the agent deferred to needs_manual_review[] when there was
       # zero mechanical work to apply (outcome == manual-review-only) —
       # surfaced in evidence so the user knows why no PR was opened.
-      analyze-manual-review-reasons: ${{ steps.analyze.outputs.manual-review-reasons }}
+      analyze-manual-review-reasons: ${{ steps.restore-analyze.outputs.manual-review-reasons }}
       # Outcome and conflict detail from the apply step — surfaced so
       # publish-evidence can say which file failed and why when apply fails.
-      apply-outcome: ${{ steps.apply.outputs.outcome }}
-      apply-conflict-detail: ${{ steps.apply.outputs.conflict-detail }}
+      apply-outcome: ${{ steps.restore-apply.outputs.outcome }}
+      apply-conflict-detail: ${{ steps.restore-apply.outputs.conflict-detail }}
       # Plain-text digest of the analyze plan (summary, and one "file|reason"
       # entry per planned file, "^"-separated) so a failure message can say
       # what the agent was trying to do, not just which file broke.
@@ -81,10 +81,13 @@ jobs:
         name: Get Bifrost config
         uses: ./actions/get-bifrost-config
 
-      # continue-on-error on analyze and apply: a failed job's outputs are not
-      # readable by publish-evidence, so these steps record their failure
-      # (their `outcome` output) without failing the job. publish-evidence
-      # then runs and reports it, and fails the run itself afterwards.
+      # analyze and apply keep their real failure status (the step shows red),
+      # but the platform discards a failed step's outputs. The action therefore
+      # saves a copy of them in the shared workspace, and the restore-* steps
+      # below republish that copy as outputs of a step that succeeds, which is
+      # what the job outputs and publish-evidence read. continue-on-error keeps
+      # the job going so publish-evidence can run; fail-unreported and fail-run
+      # turn the run red afterwards.
       - id: analyze
         name: Analyze flag removal
         uses: ./
@@ -96,6 +99,19 @@ jobs:
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
 
+      - id: restore-analyze
+        name: Restore analyze outputs
+        uses: docker://alpine:3.24
+        continue-on-error: true
+        shell: sh
+        env:
+          SAVED: ${{ cloudbees.workspace }}/.flag-cleanup/outputs-analyze
+        run: |
+          for f in outcome orphaned-files manual-review-reasons; do
+            if [ -f "$SAVED/$f" ]; then cp "$SAVED/$f" "$CLOUDBEES_OUTPUTS/$f"; else : > "$CLOUDBEES_OUTPUTS/$f"; fi
+          done
+          exit 0
+
       # Any analyze outcome that publish-evidence does not report (timeout,
       # base-unresolvable, scm-prereq-missing, missing-bifrost-creds, or no
       # outcome at all after a crash) must still fail the run, now that
@@ -104,17 +120,17 @@ jobs:
       - id: fail-unreported
         name: Fail the run for an analyze outcome that publishes no evidence
         uses: docker://alpine:3.24
-        if: ${{ steps.analyze.outputs.outcome != 'success' &&
-                steps.analyze.outputs.outcome != 'type-mismatch' &&
-                steps.analyze.outputs.outcome != 'orphaned-references' &&
-                steps.analyze.outputs.outcome != 'manual-review-only' &&
-                steps.analyze.outputs.outcome != 'no-matches' &&
-                steps.analyze.outputs.outcome != 'unsupported-language' &&
-                steps.analyze.outputs.outcome != 'report-syntax-invalid' &&
-                steps.analyze.outputs.outcome != 'error' }}
+        if: ${{ steps.restore-analyze.outputs.outcome != 'success' &&
+                steps.restore-analyze.outputs.outcome != 'type-mismatch' &&
+                steps.restore-analyze.outputs.outcome != 'orphaned-references' &&
+                steps.restore-analyze.outputs.outcome != 'manual-review-only' &&
+                steps.restore-analyze.outputs.outcome != 'no-matches' &&
+                steps.restore-analyze.outputs.outcome != 'unsupported-language' &&
+                steps.restore-analyze.outputs.outcome != 'report-syntax-invalid' &&
+                steps.restore-analyze.outputs.outcome != 'error' }}
         shell: sh
         env:
-          OUTCOME: ${{ steps.analyze.outputs.outcome }}
+          OUTCOME: ${{ steps.restore-analyze.outputs.outcome }}
         run: |
           echo "Analyze ended with outcome '${OUTCOME}', which publishes no evidence. See the Analyze flag removal step logs."
           exit 1
@@ -178,6 +194,19 @@ jobs:
           report-path: ${{ steps.analyze.outputs.report-path }}
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
+
+      - id: restore-apply
+        name: Restore apply outputs
+        uses: docker://alpine:3.24
+        continue-on-error: true
+        shell: sh
+        env:
+          SAVED: ${{ cloudbees.workspace }}/.flag-cleanup/outputs-apply
+        run: |
+          for f in outcome conflict-detail; do
+            if [ -f "$SAVED/$f" ]; then cp "$SAVED/$f" "$CLOUDBEES_OUTPUTS/$f"; else : > "$CLOUDBEES_OUTPUTS/$f"; fi
+          done
+          exit 0
 
       - id: stage-changes
         name: Stage git changes
@@ -243,6 +272,7 @@ jobs:
           MANUAL_REVIEW_REASONS: ${{ needs.remove-flag.outputs.analyze-manual-review-reasons }}
           PLAN_SUMMARY: ${{ needs.remove-flag.outputs.plan-summary }}
           PLAN_FILES: ${{ needs.remove-flag.outputs.plan-files }}
+          WORKSPACE_DIR: ${{ cloudbees.workspace }}
         run: |
           # apply always runs after analyze succeeds, so an analyze success
           # with an apply outcome that is not 'success' (including an empty
@@ -261,18 +291,53 @@ jobs:
 
             CONFLICT_FILE=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '.file // ""' 2>/dev/null)
             CONFLICT_REASON=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '.reason // ""' 2>/dev/null)
+            CONFLICT_MATCHES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '.matches // ""' 2>/dev/null)
+            # The anchored-edit tool reports an absolute workspace path.
+            if [ -n "$WORKSPACE_DIR" ]; then CONFLICT_FILE=${CONFLICT_FILE#"$WORKSPACE_DIR"/}; fi
             APPLIED_FILES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '(.applied_files // [])[]' 2>/dev/null)
             PENDING_EDIT_FILES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '(.pending_edit_files // [])[]' 2>/dev/null)
             PENDING_DELETION_FILES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '(.pending_deletion_files // [])[]' 2>/dev/null)
 
             {
-              if [ -n "$CONFLICT_FILE" ] && [ -n "$CONFLICT_REASON" ]; then
-                printf -- '- **Error:** flag `%s` was **not** removed — the agent failed to apply the planned edit to `%s`: %s.\n' \
-                  "$FLAG_NAME" "$CONFLICT_FILE" "$CONFLICT_REASON"
+              if [ -n "$CONFLICT_FILE" ] && [ "$CONFLICT_REASON" = "post-apply syntax invalid" ]; then
+                printf -- '- **Error:** flag `%s` was **not** removed — our syntax check rejected `%s` after the planned edit was applied.\n' \
+                  "$FLAG_NAME" "$CONFLICT_FILE"
+                printf -- '- If that file looks valid, this may be a limitation of the checker, which does not support some valid constructs (for example a bare `&` in JSX text).\n'
+              elif [ -n "$CONFLICT_FILE" ] && [ -n "$CONFLICT_REASON" ]; then
+                case "$CONFLICT_REASON" in
+                  "before content divergence")
+                    printf -- '- **Error:** flag `%s` was **not** removed — `%s` changed after the analysis ran, so it no longer matches the plan.\n' "$FLAG_NAME" "$CONFLICT_FILE" ;;
+                  "anchor not unique")
+                    if [ "$CONFLICT_MATCHES" = "0" ]; then
+                      printf -- '- **Error:** flag `%s` was **not** removed — the text the plan expected to change is no longer in `%s` (it may have changed since the analysis ran).\n' "$FLAG_NAME" "$CONFLICT_FILE"
+                    else
+                      printf -- '- **Error:** flag `%s` was **not** removed — the planned edit matched more than one place in `%s`, so it was not applied.\n' "$FLAG_NAME" "$CONFLICT_FILE"
+                    fi ;;
+                  "bad anchored hunk")
+                    printf -- '- **Error:** flag `%s` was **not** removed — the plan contained a malformed edit for `%s`.\n' "$FLAG_NAME" "$CONFLICT_FILE" ;;
+                  "missing")
+                    printf -- '- **Error:** flag `%s` was **not** removed — `%s` no longer exists in the repository.\n' "$FLAG_NAME" "$CONFLICT_FILE" ;;
+                  "file too large")
+                    printf -- '- **Error:** flag `%s` was **not** removed — `%s` is too large to edit automatically.\n' "$FLAG_NAME" "$CONFLICT_FILE" ;;
+                  *)
+                    printf -- '- **Error:** flag `%s` was **not** removed — the agent failed to apply the planned edit to `%s`: %s.\n' "$FLAG_NAME" "$CONFLICT_FILE" "$CONFLICT_REASON" ;;
+                esac
               else
-                printf -- '- **Error:** flag `%s` was **not** removed — the apply step failed.\n' "$FLAG_NAME"
+                case "$APPLY_OUTCOME" in
+                  stale-base)
+                    printf -- '- **Error:** flag `%s` was **not** removed — the base branch changed while the analysis was running, so the plan may no longer apply. Re-run to analyze the latest code.\n' "$FLAG_NAME" ;;
+                  ""|error)
+                    printf -- '- **Error:** flag `%s` was **not** removed — the apply step failed.\n' "$FLAG_NAME" ;;
+                  *)
+                    printf -- '- **Error:** flag `%s` was **not** removed — the apply step failed (outcome: `%s`).\n' "$FLAG_NAME" "$APPLY_OUTCOME" ;;
+                esac
               fi
               printf -- '- No changes were committed and no pull request was created.\n'
+              if [ -n "$PLAN_FILES" ]; then
+                PLAN_COUNT=$(echo "$PLAN_FILES" | tr '^' '\n' | grep -c .)
+                PLAN_PATHS=$(echo "$PLAN_FILES" | tr '^' '\n' | sed 's/|.*//; s/.*/`&`/' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+                printf -- '- Planned edits to %s files: %s\n' "$PLAN_COUNT" "$PLAN_PATHS"
+              fi
               if [ -n "$PLAN_SUMMARY" ]; then
                 printf -- '- **What the agent planned:** %s\n' "$PLAN_SUMMARY"
               fi
