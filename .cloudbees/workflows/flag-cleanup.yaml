@@ -37,6 +37,14 @@ jobs:
       # zero mechanical work to apply (outcome == manual-review-only) —
       # surfaced in evidence so the user knows why no PR was opened.
       analyze-manual-review-reasons: ${{ steps.analyze.outputs.manual-review-reasons }}
+      # Outcome from the apply step — surfaced so publish-evidence can
+      # report "apply failed" distinctly from "analyze succeeded", instead
+      # of leaving a failed run with no human-readable evidence at all.
+      apply-outcome: ${{ steps.apply.outputs.outcome }}
+      # {file, reason} for the apply_conflict that caused apply-outcome ==
+      # error — surfaced in evidence so the user knows which file and why,
+      # not just that it failed.
+      apply-conflict-detail: ${{ steps.apply.outputs.conflict-detail }}
 
     steps:
       - name: Git global credentials
@@ -148,14 +156,20 @@ jobs:
 
   publish-evidence:
     needs: remove-flag
-    if: ${{ needs.remove-flag.outputs.analyze-outcome == 'success' ||
+    # always(): remove-flag fails outright when apply fails (analyze can
+    # still have outcome == 'success'), and a job that only `needs:` a
+    # failed job is otherwise skipped — which is exactly the case this job
+    # exists to report. Without it, an apply failure left no evidence at
+    # all for the user to see.
+    if: ${{ always() && (
+            needs.remove-flag.outputs.analyze-outcome == 'success' ||
             needs.remove-flag.outputs.analyze-outcome == 'type-mismatch' ||
             needs.remove-flag.outputs.analyze-outcome == 'orphaned-references' ||
             needs.remove-flag.outputs.analyze-outcome == 'manual-review-only' ||
             needs.remove-flag.outputs.analyze-outcome == 'no-matches' ||
             needs.remove-flag.outputs.analyze-outcome == 'unsupported-language' ||
             needs.remove-flag.outputs.analyze-outcome == 'report-syntax-invalid' ||
-            needs.remove-flag.outputs.analyze-outcome == 'error' }}
+            needs.remove-flag.outputs.analyze-outcome == 'error' ) }}
     steps:
       - id: prepare-evidence
         name: Prepare evidence content
@@ -163,13 +177,62 @@ jobs:
         shell: sh
         env:
           OUTCOME: ${{ needs.remove-flag.outputs.analyze-outcome }}
+          APPLY_OUTCOME: ${{ needs.remove-flag.outputs.apply-outcome }}
+          APPLY_CONFLICT_DETAIL: ${{ needs.remove-flag.outputs.apply-conflict-detail }}
           FLAG_NAME: ${{ inputs.flag_name }}
           REPLACEMENT_VALUE: ${{ inputs.replacement_value }}
           PR_URL: ${{ needs.remove-flag.outputs.pr-url }}
           ORPHANED_FILES: ${{ needs.remove-flag.outputs.analyze-orphaned-files }}
           MANUAL_REVIEW_REASONS: ${{ needs.remove-flag.outputs.analyze-manual-review-reasons }}
         run: |
-          if [ "$OUTCOME" = "success" ]; then
+          # apply only ever runs after analyze succeeds, so a non-empty,
+          # non-success APPLY_OUTCOME means analyze-outcome is 'success'
+          # but the run still failed and opened no PR — report that before
+          # falling into the OUTCOME switch below, which would otherwise
+          # describe it as a successful cleanup.
+          if [ -n "$APPLY_OUTCOME" ] && [ "$APPLY_OUTCOME" != "success" ]; then
+            # conflict-detail can nest an "attempted" edit plus file-name
+            # arrays (see entrypoint.sh's log_apply_conflict); that's too
+            # much structure for sed, so use jq here instead of the
+            # flat-string sed extraction the other branches below use.
+            apk add --no-cache jq >/dev/null 2>&1
+
+            CONFLICT_FILE=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '.file // ""' 2>/dev/null)
+            CONFLICT_REASON=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '.reason // ""' 2>/dev/null)
+            ATTEMPTED=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq '.attempted // empty' 2>/dev/null)
+            APPLIED_FILES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '(.applied_files // [])[]' 2>/dev/null)
+            PENDING_EDIT_FILES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '(.pending_edit_files // [])[]' 2>/dev/null)
+            PENDING_DELETION_FILES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '(.pending_deletion_files // [])[]' 2>/dev/null)
+
+            {
+              if [ -n "$CONFLICT_FILE" ] && [ -n "$CONFLICT_REASON" ]; then
+                printf -- '- **Error:** flag `%s` was **not** removed — the agent failed to apply the planned edit to `%s`: %s.\n' \
+                  "$FLAG_NAME" "$CONFLICT_FILE" "$CONFLICT_REASON"
+              else
+                printf -- '- **Error:** flag `%s` was **not** removed — the apply step failed.\n' "$FLAG_NAME"
+              fi
+              printf -- '- No changes were committed and no pull request was created.\n'
+              if [ -n "$ATTEMPTED" ]; then
+                printf -- '- This is the exact edit the agent attempted to `%s`:\n' "$CONFLICT_FILE"
+                printf -- '  ```json\n%s\n  ```\n' "$ATTEMPTED"
+              fi
+              if [ -n "$APPLIED_FILES" ]; then
+                printf -- '- These files were successfully edited during the attempt, but nothing was committed, so the target repo is unchanged:\n'
+                echo "$APPLIED_FILES" | while IFS= read -r f; do [ -n "$f" ] && printf -- '    - `%s`\n' "$f"; done
+              fi
+              if [ -n "$PENDING_EDIT_FILES" ] || [ -n "$PENDING_DELETION_FILES" ]; then
+                printf -- '- These files were planned but never attempted (the run stops at the first failure):\n'
+                echo "$PENDING_EDIT_FILES" | while IFS= read -r f; do [ -n "$f" ] && printf -- '    - `%s`\n' "$f"; done
+                echo "$PENDING_DELETION_FILES" | while IFS= read -r f; do [ -n "$f" ] && printf -- '    - `%s` (planned deletion)\n' "$f"; done
+              fi
+              printf -- '- See the "Publish analyze report" evidence item on this run for the full diff of every planned file.\n'
+              if [ -n "$CONFLICT_FILE" ]; then
+                printf -- '- Re-run to retry — analyze runs fresh each time and may produce a different edit, but for a deterministic bug the error above is likely to repeat; a manual fix to `%s` may be faster.\n' "$CONFLICT_FILE"
+              else
+                printf -- '- Re-run to retry — analyze runs fresh each time and may produce a different result.\n'
+              fi
+            } > "$CLOUDBEES_OUTPUTS/content"
+          elif [ "$OUTCOME" = "success" ]; then
             printf -- '- Replaced feature flag `%s` with `%s`\n- Pull request: [PR](%s)\n' \
               "$FLAG_NAME" "$REPLACEMENT_VALUE" "$PR_URL" \
               > "$CLOUDBEES_OUTPUTS/content"
