@@ -40,6 +40,11 @@ jobs:
       # publish-evidence can say which file failed and why when apply fails.
       apply-outcome: ${{ steps.apply.outputs.outcome }}
       apply-conflict-detail: ${{ steps.apply.outputs.conflict-detail }}
+      # Plain-text digest of the analyze plan (summary, and one "file|reason"
+      # entry per planned file, "^"-separated) so a failure message can say
+      # what the agent was trying to do, not just which file broke.
+      plan-summary: ${{ steps.summarize-plan.outputs.plan-summary }}
+      plan-files: ${{ steps.summarize-plan.outputs.plan-files }}
 
     steps:
       - name: Git global credentials
@@ -76,15 +81,43 @@ jobs:
         name: Get Bifrost config
         uses: ./actions/get-bifrost-config
 
+      # continue-on-error on analyze and apply: a failed job's outputs are not
+      # readable by publish-evidence, so these steps record their failure
+      # (their `outcome` output) without failing the job. publish-evidence
+      # then runs and reports it, and fails the run itself afterwards.
       - id: analyze
         name: Analyze flag removal
         uses: ./
+        continue-on-error: true
         with:
           mode: analyze
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
+
+      # Any analyze outcome that publish-evidence does not report (timeout,
+      # base-unresolvable, scm-prereq-missing, missing-bifrost-creds, or no
+      # outcome at all after a crash) must still fail the run, now that
+      # analyze itself no longer does. Keep this list in step with the
+      # publish-evidence `if:` below.
+      - id: fail-unreported
+        name: Fail the run for an analyze outcome that publishes no evidence
+        uses: docker://alpine:3.24
+        if: ${{ steps.analyze.outputs.outcome != 'success' &&
+                steps.analyze.outputs.outcome != 'type-mismatch' &&
+                steps.analyze.outputs.outcome != 'orphaned-references' &&
+                steps.analyze.outputs.outcome != 'manual-review-only' &&
+                steps.analyze.outputs.outcome != 'no-matches' &&
+                steps.analyze.outputs.outcome != 'unsupported-language' &&
+                steps.analyze.outputs.outcome != 'report-syntax-invalid' &&
+                steps.analyze.outputs.outcome != 'error' }}
+        shell: sh
+        env:
+          OUTCOME: ${{ steps.analyze.outputs.outcome }}
+        run: |
+          echo "Analyze ended with outcome '${OUTCOME}', which publishes no evidence. See the Analyze flag removal step logs."
+          exit 1
 
       - id: read-analyze-report
         name: Read analyze report
@@ -103,10 +136,41 @@ jobs:
         with:
           content: ${{ steps.read-analyze-report.outputs.content }}
 
+      - id: summarize-plan
+        name: Summarize the planned edits
+        uses: docker://alpine:3.24
+        if: ${{ steps.analyze.outputs.outcome == 'success' }}
+        continue-on-error: true
+        shell: sh
+        env:
+          REPORT_PATH: ${{ steps.analyze.outputs.report-path }}
+        run: |
+          # Best-effort context for the failure message in publish-evidence:
+          # always leaves both output files in place and never fails the job.
+          : > "$CLOUDBEES_OUTPUTS/plan-summary"
+          : > "$CLOUDBEES_OUTPUTS/plan-files"
+          apk add --no-cache jq >/dev/null 2>&1 || exit 0
+          # c() strips characters that could be read as markup or that would
+          # break the single-line, "^"-separated format, and caps the length.
+          cat > /tmp/summary.jq <<'JQ'
+          def c($n): gsub("[\r\n\t`<>^]+"; " ") | gsub(" +"; " ") | .[0:$n];
+          (.summary // "") | sub("^[^\n]*Polyglot repo detected[^\n]*\n"; "") | c(700)
+          JQ
+          cat > /tmp/files.jq <<'JQ'
+          def c($n): gsub("[\r\n\t`<>^]+"; " ") | gsub(" +"; " ") | .[0:$n];
+          [ ((.planned_edits // [])[] | "\(.file)|\((.confidence_reason // "") | c(300))"),
+            ((.planned_deletions // [])[] | "\(.file)|planned deletion: \((.reason // "") | c(300))") ]
+          | .[0:30] | join("^")
+          JQ
+          jq -j -f /tmp/summary.jq "$REPORT_PATH" > "$CLOUDBEES_OUTPUTS/plan-summary" 2>/dev/null || : > "$CLOUDBEES_OUTPUTS/plan-summary"
+          jq -j -f /tmp/files.jq "$REPORT_PATH" > "$CLOUDBEES_OUTPUTS/plan-files" 2>/dev/null || : > "$CLOUDBEES_OUTPUTS/plan-files"
+          exit 0
+
       - id: apply
         name: Apply flag removal
         uses: ./
         if: ${{ steps.analyze.outputs.outcome == 'success' }}
+        continue-on-error: true
         with:
           mode: apply
           flag-key: ${{ inputs.flag_name }}
@@ -152,9 +216,9 @@ jobs:
   publish-evidence:
     needs: remove-flag
     # Job-level `if:` has no always()/failure() (the engine rejects them), so
-    # this is a plain condition on remove-flag's outputs. It relies on the
-    # job still being evaluated, and on `needs.remove-flag.outputs.*` still
-    # being readable, after remove-flag fails.
+    # this is a plain condition on remove-flag's outputs. That only works
+    # because analyze and apply are continue-on-error: remove-flag ends
+    # without failing, so its outputs are readable here.
     if: ${{ needs.remove-flag.outputs.analyze-outcome == 'success' ||
             needs.remove-flag.outputs.analyze-outcome == 'type-mismatch' ||
             needs.remove-flag.outputs.analyze-outcome == 'orphaned-references' ||
@@ -177,13 +241,15 @@ jobs:
           PR_URL: ${{ needs.remove-flag.outputs.pr-url }}
           ORPHANED_FILES: ${{ needs.remove-flag.outputs.analyze-orphaned-files }}
           MANUAL_REVIEW_REASONS: ${{ needs.remove-flag.outputs.analyze-manual-review-reasons }}
+          PLAN_SUMMARY: ${{ needs.remove-flag.outputs.plan-summary }}
+          PLAN_FILES: ${{ needs.remove-flag.outputs.plan-files }}
         run: |
-          # apply only ever runs after analyze succeeds, so a non-empty,
-          # non-success APPLY_OUTCOME means analyze-outcome is 'success'
-          # but the run still failed and opened no PR — report that before
-          # falling into the OUTCOME switch below, which would otherwise
-          # describe it as a successful cleanup.
-          if [ -n "$APPLY_OUTCOME" ] && [ "$APPLY_OUTCOME" != "success" ]; then
+          # apply always runs after analyze succeeds, so an analyze success
+          # with an apply outcome that is not 'success' (including an empty
+          # one, after a crash) means the run failed and opened no PR —
+          # report that before falling into the OUTCOME switch below, which
+          # would otherwise describe it as a successful cleanup.
+          if [ "$OUTCOME" = "success" ] && [ "$APPLY_OUTCOME" != "success" ]; then
             # conflict-detail's file-path arrays are too much structure
             # for sed, so use jq here instead of the flat-string sed
             # extraction the other branches below use. Deliberately no
@@ -207,6 +273,15 @@ jobs:
                 printf -- '- **Error:** flag `%s` was **not** removed — the apply step failed.\n' "$FLAG_NAME"
               fi
               printf -- '- No changes were committed and no pull request was created.\n'
+              if [ -n "$PLAN_SUMMARY" ]; then
+                printf -- '- **What the agent planned:** %s\n' "$PLAN_SUMMARY"
+              fi
+              if [ -n "$PLAN_FILES" ]; then
+                printf -- '- Planned files and why each was edited:\n'
+                echo "$PLAN_FILES" | tr '^' '\n' | while IFS= read -r entry; do
+                  [ -n "$entry" ] && printf -- '    - `%s` — %s\n' "${entry%%|*}" "${entry#*|}"
+                done
+              fi
               if [ -n "$APPLIED_FILES" ]; then
                 printf -- '- These files were successfully edited during the attempt, but nothing was committed, so the target repo is unchanged:\n'
                 echo "$APPLIED_FILES" | while IFS= read -r f; do [ -n "$f" ] && printf -- '    - `%s`\n' "$f"; done
@@ -283,3 +358,23 @@ jobs:
         uses: cloudbees-io/publish-evidence-item@v1
         with:
           content: ${{ steps.prepare-evidence.outputs.content }}
+
+      # analyze and apply no longer fail remove-flag, so fail the run here,
+      # after the evidence is published. Outcomes that exit 0 in the agent
+      # (type-mismatch, orphaned-references, manual-review-only, no-matches)
+      # stay green, as they always have.
+      - id: fail-run
+        name: Fail the run when the cleanup did not succeed
+        uses: docker://alpine:3.24
+        if: ${{ needs.remove-flag.outputs.analyze-outcome == 'unsupported-language' ||
+                needs.remove-flag.outputs.analyze-outcome == 'report-syntax-invalid' ||
+                needs.remove-flag.outputs.analyze-outcome == 'error' ||
+                (needs.remove-flag.outputs.analyze-outcome == 'success' &&
+                 needs.remove-flag.outputs.apply-outcome != 'success') }}
+        shell: sh
+        env:
+          ANALYZE_OUTCOME: ${{ needs.remove-flag.outputs.analyze-outcome }}
+          APPLY_OUTCOME: ${{ needs.remove-flag.outputs.apply-outcome }}
+        run: |
+          echo "Cleanup did not succeed (analyze: '${ANALYZE_OUTCOME}', apply: '${APPLY_OUTCOME}'). The evidence above explains why."
+          exit 1
