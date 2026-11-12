@@ -59,18 +59,7 @@ runs:
     - id: run-agent
       uses: docker://public.ecr.aws/l7o7z1g8/actions/unify-ai-flag-cleanup-agent:main-a5e174b882ceaaad8946996abb0006d7abf63512
       shell: bash
-      run: |
-        rc=0
-        /usr/local/bin/entrypoint.sh || rc=$?
-        # The platform discards a step's outputs when it exits non-zero, so keep
-        # a copy in the shared workspace (excluded from the PR by the entrypoint)
-        # for a later workflow step to republish. The exit code is unchanged.
-        if [ -n "${WORKSPACE:-}" ] && [ -n "${MODE:-}" ]; then
-          saved="$WORKSPACE/.flag-cleanup/outputs-$MODE"
-          rm -rf "$saved"
-          mkdir -p "$saved" && cp -f "$CLOUDBEES_OUTPUTS"/* "$saved"/ 2>/dev/null || true
-        fi
-        exit "$rc"
+      run: /usr/local/bin/entrypoint.sh
       env:
         MODE:                             ${{ inputs.mode }}
         FLAG_KEY:                         ${{ inputs.flag-key }}
