@@ -81,10 +81,12 @@ jobs:
         name: Get Bifrost config
         uses: ./actions/get-bifrost-config
 
-      # continue-on-error on analyze and apply: a failed job's outputs are not
-      # readable by publish-evidence, so these steps record their failure
-      # (their `outcome` output) without failing the job. publish-evidence
-      # then runs and reports it, and fails the run itself afterwards.
+      # analyze and apply must not fail remove-flag, and the platform drops a
+      # failed step's outputs, so: fail-on-error 'false' makes the action step
+      # succeed after a handled failure so its `outcome` and `conflict-detail`
+      # outputs survive, and continue-on-error covers a true crash that wrote
+      # no outputs. publish-evidence then reports the failure and fails the
+      # run itself afterwards.
       - id: analyze
         name: Analyze flag removal
         uses: ./
@@ -95,6 +97,7 @@ jobs:
           replacement-value: ${{ inputs.replacement_value }}
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
+          fail-on-error: 'false'
 
       # Any analyze outcome that publish-evidence does not report (timeout,
       # base-unresolvable, scm-prereq-missing, missing-bifrost-creds, or no
@@ -178,6 +181,7 @@ jobs:
           report-path: ${{ steps.analyze.outputs.report-path }}
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
+          fail-on-error: 'false'
 
       - id: stage-changes
         name: Stage git changes
@@ -266,13 +270,22 @@ jobs:
             PENDING_DELETION_FILES=$(printf '%s' "$APPLY_CONFLICT_DETAIL" | jq -r '(.pending_deletion_files // [])[]' 2>/dev/null)
 
             {
-              if [ -n "$CONFLICT_FILE" ] && [ -n "$CONFLICT_REASON" ]; then
+              if [ -n "$CONFLICT_FILE" ] && [ "$CONFLICT_REASON" = "post-apply syntax invalid" ]; then
+                printf -- '- **Error:** flag `%s` was **not** removed — our syntax check rejected `%s` after the planned edit was applied.\n' \
+                  "$FLAG_NAME" "$CONFLICT_FILE"
+                printf -- '- If that file looks valid, this may be a limitation of the checker, which does not support some valid constructs (for example a bare `&` in JSX text).\n'
+              elif [ -n "$CONFLICT_FILE" ] && [ -n "$CONFLICT_REASON" ]; then
                 printf -- '- **Error:** flag `%s` was **not** removed — the agent failed to apply the planned edit to `%s`: %s.\n' \
                   "$FLAG_NAME" "$CONFLICT_FILE" "$CONFLICT_REASON"
               else
                 printf -- '- **Error:** flag `%s` was **not** removed — the apply step failed.\n' "$FLAG_NAME"
               fi
               printf -- '- No changes were committed and no pull request was created.\n'
+              if [ -n "$PLAN_FILES" ]; then
+                PLAN_COUNT=$(echo "$PLAN_FILES" | tr '^' '\n' | grep -c .)
+                PLAN_PATHS=$(echo "$PLAN_FILES" | tr '^' '\n' | sed 's/|.*//; s/.*/`&`/' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+                printf -- '- Planned edits to %s files: %s\n' "$PLAN_COUNT" "$PLAN_PATHS"
+              fi
               if [ -n "$PLAN_SUMMARY" ]; then
                 printf -- '- **What the agent planned:** %s\n' "$PLAN_SUMMARY"
               fi

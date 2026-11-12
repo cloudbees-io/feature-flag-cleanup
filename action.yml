@@ -32,6 +32,10 @@ inputs:
     description: "Bifrost model alias to drive Claude Code with."
     required: false
     default: claude-5-5-opus-global
+  fail-on-error:
+    description: "When 'false', a non-zero exit from the agent is recorded in the step outputs (outcome, conflict-detail, ...) and the step still succeeds, so the calling workflow can read those outputs and report why. The platform drops a failed step's outputs, which is why this exists. The caller is then responsible for failing the run. Defaults to 'true': the step fails when the agent does."
+    required: false
+    default: 'true'
 
 outputs:
   report-path:
@@ -59,7 +63,14 @@ runs:
     - id: run-agent
       uses: docker://public.ecr.aws/l7o7z1g8/actions/unify-ai-flag-cleanup-agent:main-a5e174b882ceaaad8946996abb0006d7abf63512
       shell: bash
-      run: /usr/local/bin/entrypoint.sh
+      run: |
+        rc=0
+        /usr/local/bin/entrypoint.sh || rc=$?
+        if [ "$rc" -ne 0 ] && [ "$FAIL_ON_ERROR" = "false" ]; then
+          echo "Agent exited with status $rc; fail-on-error is false, so this step succeeds and the outcome is in its outputs."
+          exit 0
+        fi
+        exit "$rc"
       env:
         MODE:                             ${{ inputs.mode }}
         FLAG_KEY:                         ${{ inputs.flag-key }}
@@ -71,3 +82,4 @@ runs:
         BIFROST_BASE_URL:                 ${{ inputs.bifrost-base-url }}
         BIFROST_VK:                       ${{ inputs.bifrost-vk }}
         MODEL:                            ${{ inputs.model }}
+        FAIL_ON_ERROR:                    ${{ inputs.fail-on-error }}
