@@ -1,0 +1,28 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Test unify-commit action.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-unify-commit:
+    steps:
+      - id: checkout
+        name: Get source code
+        uses: cloudbees-io/checkout@v2
+
+      # Runs inside a Linux container, as the argument-size limit the tests guard against is Linux-specific. The
+      # container is the test environment, so test.sh is run directly rather than via run.sh (which needs Docker).
+      - id: test
+        name: Run unify-commit tests
+        uses: docker://alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+        shell: sh
+        run: |
+          apk add --no-cache bash jq curl git python3
+          ACTION_YAML="$PWD/actions/unify-commit/action.yaml" bash actions/unify-commit/test/test.sh
