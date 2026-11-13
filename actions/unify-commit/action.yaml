@@ -32,6 +32,37 @@ runs:
         AUTH="Authorization: Bearer $GH_TOKEN"
         ACCEPT="Accept: application/vnd.github+json"
 
+        # Request and response bodies are always passed via files/stdin, never as command-line arguments: Linux limits
+        # a single argument to 128 KiB, which a base64-encoded source file can easily exceed.
+        WORK_DIR=$(mktemp -d)
+        trap 'rm -rf "$WORK_DIR"' EXIT
+
+        # api_post STAGE URL BODY_FILE [METHOD]: send BODY_FILE (POST unless METHOD is given) and print the response body. On failure, names the stage that
+        # failed and shows GitHub's response.
+        api_post() {
+            local stage="$1" url="$2" body_file="$3" method="${4:-POST}" response_file="$WORK_DIR/response.json"
+            rm -f "$response_file"
+            if ! curl --fail-with-body --silent --show-error \
+                    -X "$method" --header "$AUTH" --header "$ACCEPT" \
+                    --data-binary @"$body_file" --output "$response_file" "$url"; then
+                echo "Error: GitHub API call failed while creating the $stage" >&2
+                [ ! -s "$response_file" ] || cat "$response_file" >&2
+                exit 1
+            fi
+            cat "$response_file"
+        }
+
+        # json_sha STAGE: read an API response from stdin and print its .sha, failing if there isn't one.
+        json_sha() {
+            local sha
+            sha=$(jq -r '.sha // empty')
+            if [ -z "$sha" ]; then
+                echo "Error: GitHub API response for the $1 contained no sha" >&2
+                exit 1
+            fi
+            echo "$sha"
+        }
+
         if [ -z "$COMMIT_MESSAGE" ]; then
             echo "Error: Commit message is required (input: commit-message)"
             exit 1
@@ -68,7 +99,8 @@ runs:
         BASE_TREE=$(curl --fail-with-body --silent --show-error \
             --header "$AUTH" --header "$ACCEPT" \
             "$API/repos/$REPO/git/commits/$BASE_COMMIT" | jq -r '.tree.sha')
-        TREE_ENTRIES="[]"
+        TREE_ENTRIES_FILE="$WORK_DIR/tree-entries.ndjson"
+        : > "$TREE_ENTRIES_FILE"
 
         while IFS=$'\t' read -r STATUS OLD_FILE NEW_FILE; do
             case "$STATUS" in
@@ -84,22 +116,24 @@ runs:
             esac
 
             if [[ "$STATUS" == D* ]]; then
-                TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq --arg path "$FILE" \
-                    '. += [{"path": $path, "mode": "100644", "type": "blob", "sha": null}]')
+                jq -cn --arg path "$FILE" \
+                    '{"path": $path, "mode": "100644", "type": "blob", "sha": null}' >> "$TREE_ENTRIES_FILE"
             else
                 if [[ "$STATUS" == R* ]]; then
-                    TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq --arg path "$OLD_FILE" \
-                        '. += [{"path": $path, "mode": "100644", "type": "blob", "sha": null}]')
+                    jq -cn --arg path "$OLD_FILE" \
+                        '{"path": $path, "mode": "100644", "type": "blob", "sha": null}' >> "$TREE_ENTRIES_FILE"
                 fi
 
-                STAGED_CONTENT_BASE64=$(git show ":$FILE" | base64 | tr -d '\n')
-                BLOB_REQUEST=$(jq -cn \
-                    --arg content "$STAGED_CONTENT_BASE64" \
-                    '{content: $content, encoding: "base64"}')
-                BLOB_SHA=$(printf '%s' "$BLOB_REQUEST" | curl --fail-with-body --silent --show-error \
-                    -X POST --header "$AUTH" --header "$ACCEPT" \
-                    --data @- \
-                    "$API/repos/$REPO/git/blobs" | jq -r '.sha')
+                # Streamed to a file rather than held in a variable or argument. Base64 output contains only
+                # [A-Za-z0-9+/=], so it needs no JSON escaping.
+                BLOB_REQUEST_FILE="$WORK_DIR/blob.json"
+                {
+                    printf '{"encoding":"base64","content":"'
+                    git show ":$FILE" | base64 | tr -d '\n'
+                    printf '"}'
+                } > "$BLOB_REQUEST_FILE"
+                BLOB_SHA=$(api_post "blob for $FILE" "$API/repos/$REPO/git/blobs" "$BLOB_REQUEST_FILE" \
+                    | json_sha "blob for $FILE")
 
                 MODE=$(git ls-files -s "$FILE" | awk '{print $1}')
                 if [ -z "$MODE" ]; then
@@ -110,64 +144,36 @@ runs:
                     fi
                 fi
 
-                TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq \
+                jq -cn \
                     --arg path "$FILE" \
                     --arg sha "$BLOB_SHA" \
                     --arg mode "$MODE" \
-                    '. += [{"path": $path, "mode": $mode, "type": "blob", "sha": $sha}]')
+                    '{"path": $path, "mode": $mode, "type": "blob", "sha": $sha}' >> "$TREE_ENTRIES_FILE"
             fi
         done < <(git diff --cached --name-status)
 
-        TREE_PAYLOAD=$(jq -n \
-            --arg base_tree "$BASE_TREE" \
-            --argjson tree "$TREE_ENTRIES" \
-            '{base_tree: $base_tree, tree: $tree}')
+        TREE_REQUEST_FILE="$WORK_DIR/tree.json"
+        jq -s --arg base_tree "$BASE_TREE" '{base_tree: $base_tree, tree: .}' "$TREE_ENTRIES_FILE" > "$TREE_REQUEST_FILE"
+        NEW_TREE=$(api_post "tree" "$API/repos/$REPO/git/trees" "$TREE_REQUEST_FILE" | json_sha "tree")
 
-        if ! TREE_RESPONSE=$(curl --fail-with-body --silent --show-error \
-                -X POST --header "$AUTH" --header "$ACCEPT" \
-                --data "$TREE_PAYLOAD" \
-                "$API/repos/$REPO/git/trees" 2>&1); then
-            echo "Error creating tree via API: $TREE_RESPONSE"
-            exit 1
-        fi
-
-        NEW_TREE=$(echo "$TREE_RESPONSE" | jq -r '.sha')
-
-        COMMIT_PAYLOAD=$(jq -n \
-            --arg message "$COMMIT_MESSAGE" \
-            --arg tree "$NEW_TREE" \
-            --arg parent "$BASE_COMMIT" \
-            '{message: $message, tree: $tree, parents: [$parent]}')
-
-        if ! COMMIT_RESPONSE=$(curl --fail-with-body --silent --show-error \
-                -X POST --header "$AUTH" --header "$ACCEPT" \
-                --data "$COMMIT_PAYLOAD" \
-                "$API/repos/$REPO/git/commits" 2>&1); then
-            echo "Error creating commit via API: $COMMIT_RESPONSE"
-            exit 1
-        fi
-
-        NEW_COMMIT=$(echo "$COMMIT_RESPONSE" | jq -r '.sha')
+        COMMIT_REQUEST_FILE="$WORK_DIR/commit.json"
+        printf '%s' "$COMMIT_MESSAGE" | jq -Rs --arg tree "$NEW_TREE" --arg parent "$BASE_COMMIT" \
+            '{message: ., tree: $tree, parents: [$parent]}' > "$COMMIT_REQUEST_FILE"
+        NEW_COMMIT=$(api_post "commit" "$API/repos/$REPO/git/commits" "$COMMIT_REQUEST_FILE" | json_sha "commit")
 
         REF_STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header "$AUTH" --header "$ACCEPT" \
             "$API/repos/$REPO/git/refs/heads/$CURRENT_BRANCH")
 
+        REF_REQUEST_FILE="$WORK_DIR/ref.json"
         if [ "$REF_STATUS" = "200" ]; then
-            PATCH_PAYLOAD=$(jq -n --arg sha "$NEW_COMMIT" '{sha: $sha}')
-            curl --fail-with-body --silent --show-error \
-                -X PATCH --header "$AUTH" --header "$ACCEPT" \
-                --data "$PATCH_PAYLOAD" \
-                "$API/repos/$REPO/git/refs/heads/$CURRENT_BRANCH" > /dev/null
+            jq -n --arg sha "$NEW_COMMIT" '{sha: $sha}' > "$REF_REQUEST_FILE"
+            api_post "branch update" "$API/repos/$REPO/git/refs/heads/$CURRENT_BRANCH" "$REF_REQUEST_FILE" PATCH \
+                > /dev/null
         else
-            CREATE_PAYLOAD=$(jq -n \
-                --arg ref "refs/heads/$CURRENT_BRANCH" \
-                --arg sha "$NEW_COMMIT" \
-                '{ref: $ref, sha: $sha}')
-            curl --fail-with-body --silent --show-error \
-                -X POST --header "$AUTH" --header "$ACCEPT" \
-                --data "$CREATE_PAYLOAD" \
-                "$API/repos/$REPO/git/refs" > /dev/null
+            jq -n --arg ref "refs/heads/$CURRENT_BRANCH" --arg sha "$NEW_COMMIT" \
+                '{ref: $ref, sha: $sha}' > "$REF_REQUEST_FILE"
+            api_post "branch" "$API/repos/$REPO/git/refs" "$REF_REQUEST_FILE" > /dev/null
         fi
 
         git fetch origin "$CURRENT_BRANCH"
