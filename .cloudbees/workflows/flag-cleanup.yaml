@@ -81,43 +81,21 @@ jobs:
         name: Get Bifrost config
         uses: ./actions/get-bifrost-config
 
-      # continue-on-error on analyze and apply: a failed job's outputs are not
-      # readable by publish-evidence, so these steps record their failure
-      # (their `outcome` output) without failing the job. publish-evidence
-      # then runs and reports it, and fails the run itself afterwards.
+      # analyze deliberately has no continue-on-error: when it exits non-zero
+      # its outputs are dropped anyway (the outcome reads as empty), so
+      # continue-on-error would only hide the failure. A failed analyze fails
+      # this job and the run. Analyze outcomes that exit 0 (success,
+      # no-matches, type-mismatch, orphaned-references, manual-review-only)
+      # are unaffected and still reach publish-evidence.
       - id: analyze
         name: Analyze flag removal
         uses: ./
-        continue-on-error: true
         with:
           mode: analyze
           flag-key: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
           bifrost-base-url: ${{ steps.bifrost-config.outputs.bifrost-base-url }}
           bifrost-vk: ${{ steps.bifrost-config.outputs.bifrost-vk }}
-
-      # Any analyze outcome that publish-evidence does not report (timeout,
-      # base-unresolvable, scm-prereq-missing, missing-bifrost-creds, or no
-      # outcome at all after a crash) must still fail the run, now that
-      # analyze itself no longer does. Keep this list in step with the
-      # publish-evidence `if:` below.
-      - id: fail-unreported
-        name: Fail the run for an analyze outcome that publishes no evidence
-        uses: docker://alpine:3.24
-        if: ${{ steps.analyze.outputs.outcome != 'success' &&
-                steps.analyze.outputs.outcome != 'type-mismatch' &&
-                steps.analyze.outputs.outcome != 'orphaned-references' &&
-                steps.analyze.outputs.outcome != 'manual-review-only' &&
-                steps.analyze.outputs.outcome != 'no-matches' &&
-                steps.analyze.outputs.outcome != 'unsupported-language' &&
-                steps.analyze.outputs.outcome != 'report-syntax-invalid' &&
-                steps.analyze.outputs.outcome != 'error' }}
-        shell: sh
-        env:
-          OUTCOME: ${{ steps.analyze.outputs.outcome }}
-        run: |
-          echo "Analyze ended with outcome '${OUTCOME}', which publishes no evidence. See the Analyze flag removal step logs."
-          exit 1
 
       - id: read-analyze-report
         name: Read analyze report
@@ -216,9 +194,11 @@ jobs:
   publish-evidence:
     needs: remove-flag
     # Job-level `if:` has no always()/failure() (the engine rejects them), so
-    # this is a plain condition on remove-flag's outputs. That only works
-    # because analyze and apply are continue-on-error: remove-flag ends
-    # without failing, so its outputs are readable here.
+    # this is a plain condition on remove-flag's outputs. For an apply
+    # failure that only works because apply is continue-on-error:
+    # remove-flag ends without failing, so its outputs are readable here.
+    # A failed analyze does fail remove-flag; its outputs are unreadable,
+    # so this job is skipped and the run is failed by remove-flag itself.
     if: ${{ needs.remove-flag.outputs.analyze-outcome == 'success' ||
             needs.remove-flag.outputs.analyze-outcome == 'type-mismatch' ||
             needs.remove-flag.outputs.analyze-outcome == 'orphaned-references' ||
