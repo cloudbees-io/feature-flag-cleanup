@@ -15,6 +15,10 @@ inputs:
   replacement-value:
     description: "The value the flag was replaced with (used in the PR body)."
     required: true
+  fallback-notice:
+    description: "Optional note appended to the PR body, e.g. that the cleanup ran on the fallback model. Empty adds nothing."
+    required: false
+    default: ""
   scm-token:
     description: "The SCM authentication token."
     required: false
@@ -37,6 +41,7 @@ runs:
         HEAD_BRANCH: ${{ inputs.head-branch }}
         FLAG_NAME: ${{ inputs.flag-name }}
         REPLACEMENT_VALUE: ${{ inputs.replacement-value }}
+        FALLBACK_NOTICE: ${{ inputs.fallback-notice }}
       run: |
         set -eu
         apk add --no-cache curl jq
@@ -61,10 +66,15 @@ runs:
           exit 1
         fi
 
+        PR_BODY="This change was submitted by the Unify AI assistant. Remove the feature flag '$FLAG_NAME', replace it with '$REPLACEMENT_VALUE'."
+        if [ -n "$FALLBACK_NOTICE" ]; then
+          PR_BODY=$(printf '%s\n\n%s' "$PR_BODY" "$FALLBACK_NOTICE")
+        fi
+
         # User inputs are passed via jq --arg (never interpolated into the shell).
         REQUEST=$(jq -n \
           --arg title "Remove feature flag $FLAG_NAME." \
-          --arg body "This change was submitted by the Unify AI assistant. Remove the feature flag '$FLAG_NAME', replace it with '$REPLACEMENT_VALUE'." \
+          --arg body "$PR_BODY" \
           --arg head "$HEAD_BRANCH" \
           --arg base "$BASE_BRANCH" \
           '{title: $title, body: $body, head: $head, base: $base}')

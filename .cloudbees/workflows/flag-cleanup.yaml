@@ -36,6 +36,10 @@ jobs:
       # zero mechanical work to apply (outcome == manual-review-only) —
       # surfaced in evidence so the user knows why no PR was opened.
       analyze-manual-review-reasons: ${{ steps.analyze.outputs.manual-review-reasons }}
+      # Set only when the analyze step had to fall back to the secondary
+      # model (e.g. Bedrock 503s on the primary) — surfaced in evidence and
+      # the PR body so the user sees which model did the cleanup.
+      analyze-model-fallback-notice: ${{ steps.analyze.outputs.model-fallback-notice }}
       # Outcome and conflict detail from the apply step — surfaced so
       # publish-evidence can say which file failed and why when apply fails.
       apply-outcome: ${{ steps.apply.outputs.outcome }}
@@ -189,6 +193,7 @@ jobs:
           head-branch: ${{ steps.branch-name.outputs.name }}
           flag-name: ${{ inputs.flag_name }}
           replacement-value: ${{ inputs.replacement_value }}
+          fallback-notice: ${{ steps.analyze.outputs.model-fallback-notice }}
           scm-token: ${{ steps.gh-access-token.outputs.access-token }}
 
   publish-evidence:
@@ -223,6 +228,7 @@ jobs:
           MANUAL_REVIEW_REASONS: ${{ needs.remove-flag.outputs.analyze-manual-review-reasons }}
           PLAN_SUMMARY: ${{ needs.remove-flag.outputs.plan-summary }}
           PLAN_FILES: ${{ needs.remove-flag.outputs.plan-files }}
+          MODEL_FALLBACK_NOTICE: ${{ needs.remove-flag.outputs.analyze-model-fallback-notice }}
         run: |
           # apply always runs after analyze succeeds, so an analyze success
           # with an apply outcome that is not 'success' (including an empty
@@ -331,6 +337,11 @@ jobs:
             printf -- '- **Error:** flag cleanup for `%s` ended with outcome `%s`. Check the step logs for details.\n' \
               "$FLAG_NAME" "$OUTCOME" \
               > "$CLOUDBEES_OUTPUTS/content"
+          fi
+
+          # Say so when the cleanup ran on the fallback model.
+          if [ -n "$MODEL_FALLBACK_NOTICE" ]; then
+            printf -- '- **Model:** %s\n' "$MODEL_FALLBACK_NOTICE" >> "$CLOUDBEES_OUTPUTS/content"
           fi
 
       - id: publish-evidence
