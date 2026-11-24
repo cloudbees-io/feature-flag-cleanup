@@ -35,7 +35,7 @@ inputs:
   fallback-model:
     description: "Bifrost model alias to switch to when `model` is unavailable (e.g. Bedrock 503s). Empty disables the fallback."
     required: false
-    default: claude-4-5-sonnet-global
+    default: claude-5-5-sonnet-global
 
 outputs:
   report-path:
